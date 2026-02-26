@@ -1,0 +1,26 @@
+market: A-share
+universe:
+  - ETF
+  - A-stock
+data_source:
+  primary: AkShare
+  tushare_token: null
+llm:
+  provider: external_api  # 使用你的大模型API
+  use_cases:
+    - news_summary
+    - sentiment
+    - research_automation
+trading:
+  mode: paper
+  constraints:
+    - T+1
+    - limit_up_down
+    - suspension
+report:
+  push:
+    feishu: true
+    target: current_dm  # 可改为特定chat_id
+  schedule:
+    daily: true
+    weekly: true

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.env
+.env.local
+.cache/
+.ipynb_checkpoints/
+/data/
+/reports/
+*.parquet
+*.feather
+*.db
+*.sqlite
+.DS_Store
+Thumbs.db
