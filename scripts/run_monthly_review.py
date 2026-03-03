@@ -22,6 +22,8 @@ def main():
     stability_path = REPORTS / "paper_rotation_param_stability.csv"
     benchmark_path = REPORTS / "paper_rotation_benchmark_compare.csv"
     rec_path = REPORTS / "paper_rotation_research_recommendation.json"
+    risk_path = REPORTS / "paper_rotation_risk_guardrails.json"
+    regime_path = REPORTS / "paper_rotation_regime_review.csv"
 
     monthly_md = REPORTS / "paper_rotation_monthly_review.md"
 
@@ -59,6 +61,19 @@ def main():
             lines.append(f"- 需人工审批：{rec.get('apply_requires_manual_approval')}")
         except Exception:
             pass
+
+    if risk_path.exists():
+        try:
+            risk = json.loads(risk_path.read_text(encoding="utf-8"))
+            lines.append(f"- 风控阈值状态：{risk.get('status')}")
+            lines.append(f"- 风控失败项：{risk.get('fail_items', [])}")
+        except Exception:
+            pass
+
+    regime = _safe_read_csv(regime_path)
+    if not regime.empty:
+        best_regime = regime.sort_values("excess_return", ascending=False).iloc[0].to_dict()
+        lines.append(f"- 市场阶段最佳超额：{best_regime}")
 
     lines.append("\n## 人工检查清单")
     lines.append("- 是否出现数据FAIL？")

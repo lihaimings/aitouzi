@@ -7,7 +7,7 @@ DATA_DIR = Path(__file__).resolve().parents[2] / 'data'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 TS_TOKEN = os.getenv('TUSHARE_TOKEN')
-pro = ts.pro_api(TS_TOKEN) if TS_TOKEN else None
+_ENV_LOADED = False
 
 ETF_LIST = [
     '510300', '510500', '159915', '512690', '512170', '512480', '512760'
@@ -19,7 +19,37 @@ def ts_code_from_etf(code: str) -> str:
     return f"{code}.SZ" if code.startswith('159') else f"{code}.SH"
 
 
+def _load_local_env_once() -> None:
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+
+    env_path = Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.exists():
+        _ENV_LOADED = True
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+    _ENV_LOADED = True
+
+
+def _get_pro():
+    _load_local_env_once()
+    token = os.getenv('TUSHARE_TOKEN', '').strip()
+    return ts.pro_api(token) if token else None
+
+
 def fetch_etf_daily(code: str) -> pd.DataFrame:
+    pro = _get_pro()
     if pro is None:
         raise RuntimeError('TuShare token not configured')
     ts_code = ts_code_from_etf(code)

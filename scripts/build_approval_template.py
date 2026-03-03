@@ -24,6 +24,9 @@ def main():
         "target_vol_ann": 0.12,
         "drawdown_stop": -0.05,
         "dd_cooldown_days": 5,
+        "max_daily_drawdown": -0.05,
+        "max_total_drawdown": -0.15,
+        "max_position_weight": 0.60,
         "_note": "复制为 paper_rotation_approved_params.json 后生效；请人工复核后再启用",
     }
 

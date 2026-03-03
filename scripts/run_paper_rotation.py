@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,7 +23,18 @@ from src.backtest.benchmark_compare import (
     compare_against_benchmarks,
     save_benchmark_compare_outputs,
 )
-from src.research import build_research_recommendation, save_research_recommendation
+from src.research import (
+    RiskLimits,
+    build_ai_research_review,
+    build_regime_review,
+    build_research_recommendation,
+    evaluate_risk_guardrails,
+    pick_regime_key_insight,
+    save_ai_research_review,
+    save_regime_review,
+    save_research_recommendation,
+    save_risk_guardrails_review,
+)
 from src.paper_trade import fills_to_frame, simulate_paper_trades
 from src.reporting import render_markdown_report, save_report
 from src.reporting.feishu_push import push_dm
@@ -31,7 +43,7 @@ from src.reporting.quantstats_report import generate_quantstats_html
 DEFAULT_CODES = ["510300", "159915"]
 
 
-def _discover_codes(source: str = "baostock"):
+def _discover_codes(source: str = "baostock", min_rows: int = 240):
     discovered = []
 
     # 兼容两种命名：
@@ -43,10 +55,19 @@ def _discover_codes(source: str = "baostock"):
     for f in source_files + generic_files:
         parts = f.stem.split("_")
         if len(parts) >= 2 and parts[1].isdigit() and len(parts[1]) == 6:
-            discovered.append(parts[1])
+            try:
+                row_n = len(pd.read_csv(f, usecols=["date"]))
+            except Exception:
+                row_n = 0
+            if row_n >= min_rows:
+                discovered.append(parts[1])
 
     discovered = sorted(set(discovered))
-    return discovered if discovered else DEFAULT_CODES
+    if discovered:
+        return discovered
+
+    print(f"[warn] no dataset passed min_rows={min_rows}, fallback to default codes")
+    return DEFAULT_CODES
 
 
 def _try_generate_quantstats(result):
@@ -82,9 +103,29 @@ def _load_approved_params(prefix: str = "paper_rotation"):
         return {}, approved_path
 
 
+def _load_config() -> dict:
+    cfg_path = ROOT / "config.yaml"
+    if not cfg_path.exists():
+        return {}
+
+    try:
+        import yaml  # type: ignore
+
+        data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"[warn] config.yaml parse failed: {e}")
+        return {}
+
+
 def main():
     codes = _discover_codes(source="baostock")
     benchmark_code = codes[0]
+    cfg = _load_config()
+
+    cfg_risk_limits = (((cfg.get("trading") or {}).get("risk_limits") or {}) if isinstance(cfg, dict) else {})
+    cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
+    cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
 
     approved_params, approved_path = _load_approved_params(prefix="paper_rotation")
 
@@ -119,6 +160,19 @@ def main():
         drawdown_stop=exec_params["drawdown_stop"],
         dd_cooldown_days=exec_params["dd_cooldown_days"],
     )
+
+    risk_limits = RiskLimits(
+        max_daily_drawdown=float(approved_params.get("max_daily_drawdown", cfg_risk_limits.get("max_daily_drawdown", -0.05))),
+        max_total_drawdown=float(approved_params.get("max_total_drawdown", cfg_risk_limits.get("max_total_drawdown", -0.15))),
+        max_position_weight=float(approved_params.get("max_position_weight", cfg_risk_limits.get("max_position_weight", 0.60))),
+    )
+    risk_review = evaluate_risk_guardrails(
+        metrics=result.metrics,
+        daily_returns=result.daily_returns,
+        weights=result.weights,
+        limits=risk_limits,
+    )
+    risk_json_path, risk_md_path = save_risk_guardrails_review(risk_review, prefix="paper_rotation")
 
     eq_path, wt_path = save_backtest_outputs(result, prefix="paper_rotation")
 
@@ -190,6 +244,43 @@ def main():
         prefix="paper_rotation",
     )
 
+    regime_df = build_regime_review(
+        strategy_returns=result.daily_returns,
+        benchmark_returns=result.benchmark_returns if result.benchmark_returns is not None else pd.Series(0.0, index=result.daily_returns.index),
+        lookback_days=int(cfg_regime.get("lookback_days", 20)),
+        bull_threshold=float(cfg_regime.get("bull_threshold", 0.03)),
+        bear_threshold=float(cfg_regime.get("bear_threshold", -0.03)),
+    )
+    regime_csv_path, regime_md_path = save_regime_review(regime_df, prefix="paper_rotation")
+    regime_insight = pick_regime_key_insight(regime_df)
+
+    ai_json_path = None
+    ai_md_path = None
+    ai_enabled = bool(cfg_ai_review)
+    if os.getenv("ENABLE_AI_RESEARCH_REVIEW", "").strip():
+        ai_enabled = os.getenv("ENABLE_AI_RESEARCH_REVIEW", "1").strip().lower() not in {"0", "false", "no"}
+
+    if ai_enabled:
+        try:
+            ai_context = {
+                "metrics": result.metrics,
+                "quality_counts": quality_df["severity"].value_counts().to_dict() if not quality_df.empty else {},
+                "walk_forward": {
+                    "avg_test_sharpe": float(wf_table["test_sharpe"].mean()) if "test_sharpe" in wf_table else 0.0,
+                    "avg_test_annual_return": float(wf_table["test_annual_return"].mean()) if "test_annual_return" in wf_table else 0.0,
+                    "worst_test_drawdown": float(wf_table["test_max_drawdown"].min()) if "test_max_drawdown" in wf_table else 0.0,
+                },
+                "stability_top": stability_df.head(3).to_dict(orient="records") if not stability_df.empty else [],
+                "benchmark_top": benchmark_df.head(3).to_dict(orient="records") if not benchmark_df.empty else [],
+                "regime_summary": regime_df.to_dict(orient="records") if not regime_df.empty else [],
+                "recommendation": recommendation,
+                "risk_guard": risk_review,
+            }
+            ai_review = build_ai_research_review(context=ai_context)
+            ai_json_path, ai_md_path = save_ai_research_review(ai_review, prefix="paper_rotation")
+        except Exception as e:
+            print(f"[warn] AI研究报告生成失败: {e}")
+
     fills = simulate_paper_trades(result.weights, fee_bps=5.0, slippage_bps=5.0)
     fills_df = fills_to_frame(fills)
     fills_path = ROOT / "reports" / "paper_rotation_fills.csv"
@@ -220,7 +311,7 @@ def main():
     best_benchmark = benchmark_df.iloc[0].to_dict() if not benchmark_df.empty else {}
 
     summary = (
-        "纸盘运行完成\n"
+        f"纸盘运行完成（风险状态: {risk_review.get('status', 'PASS')}）\n"
         f"- 执行参数: {exec_params}\n"
         f"- 审批参数文件: {approved_path}\n"
         f"- 基准: {benchmark_code}\n"
@@ -243,6 +334,14 @@ def main():
         f"- 研究建议JSON: {rec_json_path}\n"
         f"- 研究建议MD: {rec_md_path}\n"
         f"- 研究建议决策: {recommendation.get('decision')}\n"
+        f"- 风控检查JSON: {risk_json_path}\n"
+        f"- 风控检查MD: {risk_md_path}\n"
+        f"- 风控失败项: {risk_review.get('fail_items', [])}\n"
+        f"- AI研究报告JSON: {ai_json_path}\n"
+        f"- AI研究报告MD: {ai_md_path}\n"
+        f"- 市场阶段复盘CSV: {regime_csv_path}\n"
+        f"- 市场阶段复盘MD: {regime_md_path}\n"
+        f"- 市场阶段关键洞察: {regime_insight}\n"
         f"- 多基准对照CSV: {benchmark_csv_path}\n"
         f"- 多基准对照MD: {benchmark_md_path}\n"
         f"- 多基准最佳IR: {best_benchmark}"

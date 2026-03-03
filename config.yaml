@@ -17,6 +17,17 @@ trading:
     - T+1
     - limit_up_down
     - suspension
+  risk_limits:
+    max_daily_drawdown: -0.05
+    max_total_drawdown: -0.15
+    max_position_weight: 0.60
+research:
+  ai_review:
+    enabled: true
+  regime:
+    lookback_days: 20
+    bull_threshold: 0.03
+    bear_threshold: -0.03
 report:
   push:
     feishu: true
@@ -24,3 +35,4 @@ report:
   schedule:
     daily: true
     weekly: true
+    monthly: true

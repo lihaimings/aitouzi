@@ -48,6 +48,8 @@
 1) 安装依赖：
    - `python -m pip install -r requirements.txt`
 2) 先拉取本地 ETF 数据（AkShare 或 Baostock）
+   - 先刷新200只ETF池：`python scripts/refresh_etf_universe.py --size 200`
+   - 再抓数（带分批冷启动）：`python scripts/fetch_etf_cache.py --universe-size 200 --max-retries 1 --retry-sleep 1 --fresh-tolerance-days 3 --min-bootstrap-rows 240 --bootstrap-batch-size 10`
 3) 运行日常流水线（推荐）：
    - `python scripts/run_daily_pipeline.py`
    - （会自动先拉取ETF数据，再执行纸盘/研究流程）
@@ -68,10 +70,19 @@
    - `reports/paper_rotation_exposure_scale.csv`
    - `reports/paper_rotation_benchmark_compare.csv`
    - `reports/paper_rotation_benchmark_compare.md`
-   - `reports/paper_rotation_research_recommendation.json`
-   - `reports/paper_rotation_research_recommendation.md`
-   - `reports/paper_rotation_quantstats.html`
-   - `reports/paper_rotation_monthly_review.md`（运行月度复盘脚本后生成）
+    - `reports/paper_rotation_research_recommendation.json`
+    - `reports/paper_rotation_research_recommendation.md`
+    - `reports/paper_rotation_risk_guardrails.json`
+    - `reports/paper_rotation_risk_guardrails.md`
+    - `reports/paper_rotation_ai_review.json`
+    - `reports/paper_rotation_ai_review.md`
+    - `reports/paper_rotation_regime_review.csv`
+    - `reports/paper_rotation_regime_review.md`
+    - `reports/paper_rotation_weekly_review.md`（运行周度脚本后生成）
+    - `reports/paper_rotation_quantstats.html`
+    - `reports/paper_rotation_monthly_review.md`（运行月度复盘脚本后生成）
+    - `reports/paper_rotation_fetch_status.csv`
+    - `reports/paper_rotation_fetch_status.json`
 
 ## 当前程序运行流程（run_paper_rotation）
 1) 自动扫描 `data/` 下可用ETF文件（优先 `etf_*_baostock.csv`）
@@ -101,8 +112,11 @@
 11) 运行多基准对照（510300 / 510500 / 主基准）并计算IR
 12) 运行 Backtesting.py 单资产SMA基准策略（对照组）
 13) 研究层输出参数建议（仅建议，不自动生效）
-14) 生成 QuantStats HTML 报告（图形化绩效，含基准对比）
-15) （可选）运行月度复盘汇总脚本，输出一页检查清单
+14) 风控阈值检查（最大单日回撤/总回撤/单标的权重）
+15) AI研究助手输出结构化审阅建议（仅建议，不自动执行）
+16) 市场阶段复盘（牛/熊/震荡分段）
+17) 生成 QuantStats HTML 报告（图形化绩效，含基准对比）
+18) （可选）运行月度复盘汇总脚本，输出一页检查清单
 
 ## 你提供的大模型 API 接入
 默认读取环境变量：
@@ -122,6 +136,7 @@
 - 参见：`docs/quant-research-roadmap.md`
 - 双体系手册：`docs/two-layer-architecture-and-playbook.md`
 - 自动化与审批：`docs/automation-schedule.md`
+- 免费数据稳定性：`docs/free-data-stack-and-stability.md`
 - 当前已落地：
   - 基准对比（benchmark alpha）
   - 风险平价权重（inverse-vol）

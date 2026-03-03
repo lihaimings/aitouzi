@@ -1,6 +1,7 @@
 import baostock as bs
 import pandas as pd
 from pathlib import Path
+from typing import Optional
 
 DATA_DIR = Path(__file__).resolve().parents[2] / 'data'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -24,17 +25,23 @@ def code_with_exchange(code: str) -> str:
         return f"sh.{code}"
 
 
-def fetch_k_daily(code: str) -> pd.DataFrame:
+def fetch_k_daily(code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
     lg = bs.login()
     try:
         if lg.error_code != '0':
             raise RuntimeError(f"baostock login failed: {lg.error_msg}")
-        rs = bs.query_history_k_data_plus(
-            code_with_exchange(code),
-            fields='date,open,high,low,close,volume,amount',
-            frequency='d',
-            adjustflag='3'  # 不复权
-        )
+        query_kwargs = {
+            "code": code_with_exchange(code),
+            "fields": 'date,open,high,low,close,volume,amount',
+            "frequency": 'd',
+            "adjustflag": '3',
+        }
+        if start_date:
+            query_kwargs["start_date"] = start_date
+        if end_date:
+            query_kwargs["end_date"] = end_date
+
+        rs = bs.query_history_k_data_plus(**query_kwargs)
         if rs.error_code != '0':
             raise RuntimeError(f"baostock query failed: {rs.error_msg}")
         data_list = []
@@ -45,14 +52,14 @@ def fetch_k_daily(code: str) -> pd.DataFrame:
         numeric_cols = ['open','high','low','close','volume','amount']
         for c in numeric_cols:
             df[c] = pd.to_numeric(df[c], errors='coerce')
-        df = df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+        df = df.dropna(subset=['date', 'close']).sort_values('date').reset_index(drop=True)
         return df
     finally:
         bs.logout()
 
 
-def cache_daily(code: str) -> Path:
-    df = fetch_k_daily(code)
+def cache_daily(code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Path:
+    df = fetch_k_daily(code, start_date=start_date, end_date=end_date)
     out = DATA_DIR / f"etf_{code}_baostock.csv"
     df.to_csv(out, index=False)
     return out

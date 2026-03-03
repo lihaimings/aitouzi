@@ -2,6 +2,7 @@ import pandas as pd
 import akshare as ak
 from pathlib import Path
 import time
+from typing import Optional
 
 DATA_DIR = Path(__file__).resolve().parents[2] / 'data'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -35,19 +36,32 @@ ETF_LIST = [
 ]
 
 
-def fetch_etf_daily(etf_code: str) -> pd.DataFrame:
-    df = ak.fund_etf_hist_em(symbol=etf_code)
+def fetch_etf_daily(etf_code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+    kwargs = {
+        "symbol": etf_code,
+        "period": "daily",
+        "adjust": "",
+    }
+    if start_date:
+        kwargs["start_date"] = start_date
+    if end_date:
+        kwargs["end_date"] = end_date
+
+    df = ak.fund_etf_hist_em(**kwargs)
     df = df.rename(columns={
         '日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low',
         '成交量': 'volume', '成交额': 'amount'
     })
+    for col in ["open", "high", "low", "close", "volume", "amount"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
     df['date'] = pd.to_datetime(df['date'])
-    df = df.sort_values('date').reset_index(drop=True)
+    df = df.dropna(subset=["date", "close"]).sort_values('date').reset_index(drop=True)
     return df
 
 
-def cache_etf_daily(etf_code: str):
-    df = fetch_etf_daily(etf_code)
+def cache_etf_daily(etf_code: str, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    df = fetch_etf_daily(etf_code, start_date=start_date, end_date=end_date)
     # 先写 CSV（兜底），再尝试写 Parquet
     csv_out = DATA_DIR / f"etf_{etf_code}.csv"
     df.to_csv(csv_out, index=False)

@@ -4,8 +4,18 @@
 - `python scripts/run_daily_pipeline.py`
 
 该脚本会：
-1. 更新ETF数据缓存
+1. 刷新200只ETF候选池（按流动性）
+2. 更新ETF数据缓存（分批冷启动）
 2. 运行纸盘/研究流程并生成报告
+3. 输出风控阈值检查与AI研究审阅报告（默认开启）
+
+抓数增强说明（免费源）：
+- 默认按 `akshare -> efinance -> tushare -> baostock` 依次回退
+- 单个代码失败时会自动重试并保留旧缓存（标记为 stale，不中断全流程）
+- 对无本地缓存的新标的采用“分批冷启动”（默认每次10个），避免一次性全量拉取阻塞
+- 会输出抓数状态报告：
+  - `reports/paper_rotation_fetch_status.json`
+  - `reports/paper_rotation_fetch_status.csv`
 
 ## 方式一：任务计划程序（推荐）
 
@@ -32,6 +42,33 @@ python scripts/run_monthly_review.py
 
 输出：
 - `reports/paper_rotation_monthly_review.md`
+
+## 周度研究复盘（建议每周一次）
+
+```powershell Terminal
+python scripts/run_weekly_research.py
+```
+
+该脚本会：
+1. 跑一遍日常流水线（更新数据+主流程）
+2. 生成月度复盘与AI审阅报告
+3. 生成周度研究复盘并推送飞书
+
+输出：
+- `reports/paper_rotation_weekly_review.md`
+
+## 单独运行 AI 研究审阅（可选）
+
+```powershell Terminal
+python scripts/run_ai_research_review.py
+```
+
+输出：
+- `reports/paper_rotation_ai_review.json`
+- `reports/paper_rotation_ai_review.md`
+
+可通过环境变量关闭主流程中的AI审阅：
+- `ENABLE_AI_RESEARCH_REVIEW=0`
 
 ## 参数审批模板（半自动）
 
@@ -60,4 +97,3 @@ python scripts/apply_approved_template.py
 - 研究建议默认不会自动改策略参数
 - `scripts/fetch_etf_cache.py` 会优先更新主ETF池，并自动补齐关键基准（510300/510500/159915）
 - 若你决定升级参数，可按“参数审批模板（半自动）”流程操作
-
