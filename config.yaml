@@ -4,7 +4,7 @@ universe:
   - A-stock
 data_source:
   primary: AkShare
-  tushare_token: null
+  tushare_token: ${TUSHARE_TOKEN}
 llm:
   provider: external_api  # 使用你的大模型API
   use_cases:
