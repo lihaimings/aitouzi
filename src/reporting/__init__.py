@@ -35,6 +35,12 @@ def render_markdown_report(
         extra_lines += f"- 胜率（日频）：{metrics.get('win_rate', 0.0):.2%}\n"
     if "alpha_annual" in metrics:
         extra_lines += f"- 年化Alpha：{pct(metrics.get('alpha_annual', 0.0))}\n"
+    if "cost_total" in metrics:
+        extra_lines += f"- 交易总成本（权重口径）：{metrics.get('cost_total', 0.0):.4f}\n"
+    if "cost_impact" in metrics:
+        extra_lines += f"- 冲击成本（权重口径）：{metrics.get('cost_impact', 0.0):.4f}\n"
+    if "avg_turnover" in metrics:
+        extra_lines += f"- 平均换手（单日）：{metrics.get('avg_turnover', 0.0):.2%}\n"
 
     return (
         "# AI 投资策略日报（纸盘）\n\n"

@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.backtest.vectorbt_runner import (
+    load_amount_matrix,
     run_from_local_cache,
     run_walk_forward_from_local_cache,
     save_backtest_outputs,
@@ -124,6 +125,7 @@ def main():
     cfg = _load_config()
 
     cfg_risk_limits = (((cfg.get("trading") or {}).get("risk_limits") or {}) if isinstance(cfg, dict) else {})
+    cfg_cost_model = (((cfg.get("trading") or {}).get("cost_model") or {}) if isinstance(cfg, dict) else {})
     cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
     cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
 
@@ -137,6 +139,11 @@ def main():
         "target_vol_ann": float(approved_params.get("target_vol_ann", 0.12)),
         "drawdown_stop": float(approved_params.get("drawdown_stop", -0.05)),
         "dd_cooldown_days": int(approved_params.get("dd_cooldown_days", 5)),
+        "fee_bps": float(approved_params.get("fee_bps", cfg_cost_model.get("fee_bps", 5.0))),
+        "slippage_bps": float(approved_params.get("slippage_bps", cfg_cost_model.get("slippage_bps", 5.0))),
+        "impact_bps": float(approved_params.get("impact_bps", cfg_cost_model.get("impact_bps", 2.0))),
+        "impact_power": float(approved_params.get("impact_power", cfg_cost_model.get("impact_power", 0.5))),
+        "impact_bps_cap_mult": float(approved_params.get("impact_bps_cap_mult", cfg_cost_model.get("impact_bps_cap_mult", 5.0))),
     }
 
     quality_df = audit_universe(codes=codes, source="baostock", jump_threshold=0.12)
@@ -147,8 +154,8 @@ def main():
         source="baostock",
         rebalance="W-FRI",
         top_n=exec_params["top_n"],
-        fee_bps=5.0,
-        slippage_bps=5.0,
+        fee_bps=exec_params["fee_bps"],
+        slippage_bps=exec_params["slippage_bps"],
         min_score=exec_params["min_score"],
         benchmark_code=benchmark_code,
         max_turnover=exec_params["max_turnover"],
@@ -159,6 +166,9 @@ def main():
         max_leverage=1.0,
         drawdown_stop=exec_params["drawdown_stop"],
         dd_cooldown_days=exec_params["dd_cooldown_days"],
+        impact_bps=exec_params["impact_bps"],
+        impact_power=exec_params["impact_power"],
+        impact_bps_cap_mult=exec_params["impact_bps_cap_mult"],
     )
 
     risk_limits = RiskLimits(
@@ -180,8 +190,8 @@ def main():
         codes=codes,
         source="baostock",
         rebalance="W-FRI",
-        fee_bps=5.0,
-        slippage_bps=5.0,
+        fee_bps=exec_params["fee_bps"],
+        slippage_bps=exec_params["slippage_bps"],
         train_days=15,
         test_days=8,
         step_days=8,
@@ -197,8 +207,8 @@ def main():
         codes=codes,
         source="baostock",
         rebalance="W-FRI",
-        fee_bps=5.0,
-        slippage_bps=5.0,
+        fee_bps=exec_params["fee_bps"],
+        slippage_bps=exec_params["slippage_bps"],
         top_n_grid=[1, 2, 3],
         min_score_grid=[-0.2, -0.1, 0.0],
         vol_lookback_grid=[10, 20, 40],
@@ -281,7 +291,16 @@ def main():
         except Exception as e:
             print(f"[warn] AI研究报告生成失败: {e}")
 
-    fills = simulate_paper_trades(result.weights, fee_bps=5.0, slippage_bps=5.0)
+    amount_df = load_amount_matrix(codes=codes, source="baostock").reindex(result.weights.index).fillna(0.0)
+    fills = simulate_paper_trades(
+        result.weights,
+        fee_bps=exec_params["fee_bps"],
+        slippage_bps=exec_params["slippage_bps"],
+        amount_df=amount_df,
+        impact_bps=exec_params["impact_bps"],
+        impact_power=exec_params["impact_power"],
+        impact_bps_cap_mult=exec_params["impact_bps_cap_mult"],
+    )
     fills_df = fills_to_frame(fills)
     fills_path = ROOT / "reports" / "paper_rotation_fills.csv"
     fills_df.to_csv(fills_path, index=False)
@@ -309,6 +328,8 @@ def main():
 
     best_stab = stability_df.iloc[0].to_dict() if not stability_df.empty else {}
     best_benchmark = benchmark_df.iloc[0].to_dict() if not benchmark_df.empty else {}
+    fill_cost_total = float(fills_df["est_cost"].sum()) if not fills_df.empty else 0.0
+    fill_impact_total = float(fills_df["impact_cost"].sum()) if not fills_df.empty else 0.0
 
     summary = (
         f"纸盘运行完成（风险状态: {risk_review.get('status', 'PASS')}）\n"
@@ -323,6 +344,9 @@ def main():
         f"- 权重文件: {wt_path}\n"
         f"- 成交文件: {fills_path}\n"
         f"- 风险预算缩放: {exposure_path}\n"
+        f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
+        f"- 回测总成本: {result.metrics.get('cost_total', 0.0):.4f}（冲击成本 {result.metrics.get('cost_impact', 0.0):.4f}）\n"
+        f"- 模拟成交总成本: {fill_cost_total:.4f}（冲击成本 {fill_impact_total:.4f}）\n"
         f"- 报告文件: {report_path}\n"
         f"- WalkForward窗口表: {wf_table_path}\n"
         f"- WalkForward净值: {wf_equity_path}\n"

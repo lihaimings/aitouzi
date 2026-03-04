@@ -22,9 +22,12 @@ class BacktestResult:
     metrics: Dict[str, float]
     benchmark_returns: Optional[pd.Series] = None
     exposure_scale: Optional[pd.Series] = None
+    fee_slippage_cost: Optional[pd.Series] = None
+    impact_cost: Optional[pd.Series] = None
+    total_cost: Optional[pd.Series] = None
 
 
-def _load_etf_close(code: str, source: str = "baostock") -> pd.Series:
+def _load_etf_field(code: str, field: str, source: str = "baostock") -> pd.Series:
     candidates = [
         DATA_DIR / f"etf_{code}_{source}.csv",
         DATA_DIR / f"etf_{code}.csv",
@@ -40,19 +43,42 @@ def _load_etf_close(code: str, source: str = "baostock") -> pd.Series:
     else:
         df = pd.read_csv(target)
 
-    if "date" not in df.columns or "close" not in df.columns:
-        raise ValueError(f"数据缺少必要列(date/close): {target}")
+    if "date" not in df.columns or field not in df.columns:
+        raise ValueError(f"数据缺少必要列(date/{field}): {target}")
 
     df["date"] = pd.to_datetime(df["date"])
-    series = df.set_index("date")["close"].astype(float).sort_index()
+    series = pd.to_numeric(df.set_index("date")[field], errors="coerce").astype(float).sort_index()
     series.name = code
     return series
+
+
+def _load_etf_close(code: str, source: str = "baostock") -> pd.Series:
+    return _load_etf_field(code=code, field="close", source=source)
+
+
+def _load_etf_amount(code: str, source: str = "baostock") -> pd.Series:
+    return _load_etf_field(code=code, field="amount", source=source)
 
 
 def load_close_matrix(codes: Iterable[str], source: str = "baostock") -> pd.DataFrame:
     prices = [_load_etf_close(c, source=source) for c in codes]
     mat = pd.concat(prices, axis=1).sort_index().dropna(how="all")
     return mat.ffill().dropna(how="any")
+
+
+def load_amount_matrix(codes: Iterable[str], source: str = "baostock") -> pd.DataFrame:
+    amount_list = []
+    for c in codes:
+        try:
+            amount_list.append(_load_etf_amount(c, source=source))
+        except Exception:
+            pass
+
+    if not amount_list:
+        return pd.DataFrame()
+
+    mat = pd.concat(amount_list, axis=1).sort_index()
+    return mat.fillna(0.0)
 
 
 def compute_rotation_score(
@@ -162,6 +188,10 @@ def run_rotation_backtest(
     max_leverage: float = 1.0,
     drawdown_stop: Optional[float] = None,
     dd_cooldown_days: int = 0,
+    amount_df: Optional[pd.DataFrame] = None,
+    impact_bps: float = 0.0,
+    impact_power: float = 0.5,
+    impact_bps_cap_mult: float = 5.0,
 ) -> BacktestResult:
     close_df = close_df.sort_index().ffill().dropna(how="any")
     ret = close_df.pct_change().fillna(0.0)
@@ -183,6 +213,14 @@ def run_rotation_backtest(
         weights = _apply_turnover_cap(weights, max_turnover=max_turnover)
 
     cost_rate = (fee_bps + slippage_bps) / 10000.0
+    impact_rate_base = max(0.0, impact_bps) / 10000.0
+    impact_power = max(0.0, float(impact_power))
+    impact_rate_cap = max(impact_rate_base, impact_rate_base * max(1.0, float(impact_bps_cap_mult)))
+
+    if amount_df is not None and not amount_df.empty:
+        amount_df = amount_df.reindex(ret.index).fillna(0.0)
+    else:
+        amount_df = pd.DataFrame(index=ret.index, columns=ret.columns, data=0.0)
 
     # 风险预算：波动目标 + 回撤保护（按日动态缩放仓位）
     exposure_scale = pd.Series(1.0, index=weights.index, dtype=float)
@@ -198,6 +236,8 @@ def run_rotation_backtest(
 
     gross_list: List[float] = []
     turnover_list: List[float] = []
+    fee_slippage_cost_list: List[float] = []
+    impact_cost_list: List[float] = []
     net_list: List[float] = []
 
     for dt in weights.index:
@@ -226,12 +266,28 @@ def run_rotation_backtest(
 
         daily_ret = ret.loc[dt].fillna(0.0)
         gross_t = float((prev_eff_exec * daily_ret).sum())
-        turnover_t = float((eff_target - prev_eff_target).abs().sum())
-        cost_t = turnover_t * cost_rate
-        net_t = gross_t - cost_t
+        delta_w = (eff_target - prev_eff_target).abs()
+        turnover_t = float(delta_w.sum())
+        fee_slippage_cost_t = turnover_t * cost_rate
+
+        amount_row = amount_df.loc[dt].reindex(delta_w.index).fillna(0.0).astype(float)
+        amount_sum = float(amount_row.sum())
+        if impact_rate_base > 0 and amount_sum > 0:
+            liq_share = amount_row / amount_sum
+            ratio = delta_w / (liq_share + 1e-8)
+            impact_rate_vec = (ratio.clip(lower=0.0) ** impact_power) * impact_rate_base
+            impact_rate_vec = impact_rate_vec.clip(upper=impact_rate_cap)
+            impact_cost_t = float((delta_w * impact_rate_vec).sum())
+        else:
+            impact_cost_t = 0.0
+
+        total_cost_t = fee_slippage_cost_t + impact_cost_t
+        net_t = gross_t - total_cost_t
 
         gross_list.append(gross_t)
         turnover_list.append(turnover_t)
+        fee_slippage_cost_list.append(fee_slippage_cost_t)
+        impact_cost_list.append(impact_cost_t)
         net_list.append(net_t)
 
         cur_equity *= (1.0 + net_t)
@@ -243,8 +299,10 @@ def run_rotation_backtest(
 
     gross = pd.Series(gross_list, index=weights.index, name="gross")
     turnover = pd.Series(turnover_list, index=weights.index, name="turnover")
+    fee_slippage_cost = pd.Series(fee_slippage_cost_list, index=weights.index, name="fee_slippage_cost")
+    impact_cost = pd.Series(impact_cost_list, index=weights.index, name="impact_cost")
     net = pd.Series(net_list, index=weights.index, name="net")
-    costs = turnover * cost_rate
+    costs = fee_slippage_cost + impact_cost
 
     weights = eff_weights
     equity = (1.0 + net).cumprod() * init_cash
@@ -253,6 +311,10 @@ def run_rotation_backtest(
         bench = pd.Series(benchmark_returns).reindex(net.index).fillna(0.0)
 
     metrics = compute_performance_metrics(equity=equity, daily_returns=net, benchmark_returns=bench)
+    metrics["cost_total"] = float(costs.sum())
+    metrics["cost_fee_slippage"] = float(fee_slippage_cost.sum())
+    metrics["cost_impact"] = float(impact_cost.sum())
+    metrics["avg_turnover"] = float(turnover.mean())
 
     return BacktestResult(
         equity=equity,
@@ -262,6 +324,9 @@ def run_rotation_backtest(
         metrics=metrics,
         benchmark_returns=bench,
         exposure_scale=exposure_scale,
+        fee_slippage_cost=fee_slippage_cost,
+        impact_cost=impact_cost,
+        total_cost=costs,
     )
 
 
@@ -283,8 +348,12 @@ def run_from_local_cache(
     max_leverage: float = 1.0,
     drawdown_stop: Optional[float] = None,
     dd_cooldown_days: int = 0,
+    impact_bps: float = 0.0,
+    impact_power: float = 0.5,
+    impact_bps_cap_mult: float = 5.0,
 ) -> BacktestResult:
     close = load_close_matrix(codes=codes, source=source)
+    amount = load_amount_matrix(codes=codes, source=source).reindex(close.index).fillna(0.0)
 
     bench = None
     if benchmark_code is not None:
@@ -308,6 +377,10 @@ def run_from_local_cache(
         max_leverage=max_leverage,
         drawdown_stop=drawdown_stop,
         dd_cooldown_days=dd_cooldown_days,
+        amount_df=amount,
+        impact_bps=impact_bps,
+        impact_power=impact_power,
+        impact_bps_cap_mult=impact_bps_cap_mult,
     )
 
 
