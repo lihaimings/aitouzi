@@ -2,3 +2,4 @@ from src.research.governance import build_research_recommendation, save_research
 from src.research.risk_control import RiskLimits, evaluate_risk_guardrails, save_risk_guardrails_review
 from src.research.ai_review import build_ai_research_review, save_ai_research_review
 from src.research.regime_review import build_regime_review, pick_regime_key_insight, save_regime_review
+from src.research.param_freeze import FreezeDecision, evaluate_param_freeze, persist_param_freeze_state

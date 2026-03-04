@@ -127,7 +127,9 @@ def main():
     cfg_risk_limits = (((cfg.get("trading") or {}).get("risk_limits") or {}) if isinstance(cfg, dict) else {})
     cfg_cost_model = (((cfg.get("trading") or {}).get("cost_model") or {}) if isinstance(cfg, dict) else {})
     cfg_stop_guard = (((cfg.get("trading") or {}).get("stop_guard") or {}) if isinstance(cfg, dict) else {})
+    cfg_regime_filter = (((cfg.get("trading") or {}).get("regime_filter") or {}) if isinstance(cfg, dict) else {})
     cfg_quality = (((cfg.get("operations") or {}).get("quality_redline") or {}) if isinstance(cfg, dict) else {})
+    cfg_targets = (((cfg.get("operations") or {}).get("simulation_targets") or {}) if isinstance(cfg, dict) else {})
     cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
     cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
 
@@ -149,6 +151,11 @@ def main():
         "daily_loss_stop": float(approved_params.get("daily_loss_stop", cfg_stop_guard.get("daily_loss_stop", -0.03))),
         "monthly_drawdown_stop": float(approved_params.get("monthly_drawdown_stop", cfg_stop_guard.get("monthly_drawdown_stop", -0.10))),
         "stop_cooldown_days": int(approved_params.get("stop_cooldown_days", cfg_stop_guard.get("stop_cooldown_days", 3))),
+        "regime_filter_enabled": bool(approved_params.get("regime_filter_enabled", cfg_regime_filter.get("enabled", True))),
+        "regime_ma_window": int(approved_params.get("regime_ma_window", cfg_regime_filter.get("ma_window", 200))),
+        "regime_vol_window": int(approved_params.get("regime_vol_window", cfg_regime_filter.get("vol_window", 20))),
+        "regime_high_vol_threshold": float(approved_params.get("regime_high_vol_threshold", cfg_regime_filter.get("high_vol_threshold", 0.02))),
+        "regime_defensive_exposure": float(approved_params.get("regime_defensive_exposure", cfg_regime_filter.get("defensive_exposure", 0.30))),
     }
 
     quality_df = audit_universe(
@@ -186,6 +193,11 @@ def main():
         daily_loss_stop=exec_params["daily_loss_stop"],
         monthly_drawdown_stop=exec_params["monthly_drawdown_stop"],
         stop_cooldown_days=exec_params["stop_cooldown_days"],
+        regime_filter_enabled=exec_params["regime_filter_enabled"],
+        regime_ma_window=exec_params["regime_ma_window"],
+        regime_vol_window=exec_params["regime_vol_window"],
+        regime_high_vol_threshold=exec_params["regime_high_vol_threshold"],
+        regime_defensive_exposure=exec_params["regime_defensive_exposure"],
     )
 
     risk_limits = RiskLimits(
@@ -348,6 +360,25 @@ def main():
     fill_cost_total = float(fills_df["est_cost"].sum()) if not fills_df.empty else 0.0
     fill_impact_total = float(fills_df["impact_cost"].sum()) if not fills_df.empty else 0.0
 
+    target_eval = {
+        "annual_return": {
+            "target": float(cfg_targets.get("annual_return_min", 0.08)),
+            "observed": float(result.metrics.get("annual_return", 0.0)),
+            "pass": float(result.metrics.get("annual_return", 0.0)) >= float(cfg_targets.get("annual_return_min", 0.08)),
+        },
+        "max_drawdown": {
+            "target": float(cfg_targets.get("max_drawdown_min", -0.20)),
+            "observed": float(result.metrics.get("max_drawdown", 0.0)),
+            "pass": float(result.metrics.get("max_drawdown", 0.0)) >= float(cfg_targets.get("max_drawdown_min", -0.20)),
+        },
+        "sharpe": {
+            "target": float(cfg_targets.get("sharpe_min", 0.8)),
+            "observed": float(result.metrics.get("sharpe", 0.0)),
+            "pass": float(result.metrics.get("sharpe", 0.0)) >= float(cfg_targets.get("sharpe_min", 0.8)),
+        },
+    }
+    target_fail_items = [k for k, v in target_eval.items() if not bool(v.get("pass", False))]
+
     summary = (
         f"纸盘运行完成（风险状态: {risk_review.get('status', 'PASS')}）\n"
         f"- 执行参数: {exec_params}\n"
@@ -363,8 +394,10 @@ def main():
         f"- 风险预算缩放: {exposure_path}\n"
         f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
         f"- 停盘阈值: daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
+        f"- 市场状态过滤: enabled={exec_params['regime_filter_enabled']}, ma={exec_params['regime_ma_window']}, vol_window={exec_params['regime_vol_window']}, vol_th={exec_params['regime_high_vol_threshold']}, def_exp={exec_params['regime_defensive_exposure']}\n"
         f"- 回测总成本: {result.metrics.get('cost_total', 0.0):.4f}（冲击成本 {result.metrics.get('cost_impact', 0.0):.4f}）\n"
         f"- 停盘触发次数: daily={int(result.metrics.get('stop_trigger_daily', 0))}, monthly={int(result.metrics.get('stop_trigger_monthly', 0))}, total_dd={int(result.metrics.get('stop_trigger_total_dd', 0))}\n"
+        f"- 模拟目标评估: fail_items={target_fail_items}, detail={target_eval}\n"
         f"- 模拟成交总成本: {fill_cost_total:.4f}（冲击成本 {fill_impact_total:.4f}）\n"
         f"- 报告文件: {report_path}\n"
         f"- WalkForward窗口表: {wf_table_path}\n"

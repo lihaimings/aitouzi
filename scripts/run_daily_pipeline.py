@@ -32,7 +32,7 @@ def main():
             "--universe-size",
             str(UNIVERSE_SIZE),
             "--max-retries",
-            "1",
+            "3",
             "--retry-sleep",
             "1",
             "--fresh-tolerance-days",
@@ -47,8 +47,14 @@ def main():
     # 3) 运行研究/纸盘主流程
     _run_step([py, "scripts/run_preflight_check.py", "--strict", "--push"])
 
-    # 4) 运行研究/纸盘主流程
+    # 4) T+1 机制一致性校验
+    _run_step([py, "scripts/run_tplus1_check.py"])
+
+    # 5) 运行研究/纸盘主流程
     _run_step([py, "scripts/run_paper_rotation.py"])
+
+    # 6) 系统健康报告
+    _run_step([py, "scripts/run_system_health.py"])
 
     print("\n[done] daily pipeline finished")
 

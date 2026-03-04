@@ -195,6 +195,12 @@ def run_rotation_backtest(
     daily_loss_stop: Optional[float] = None,
     monthly_drawdown_stop: Optional[float] = None,
     stop_cooldown_days: int = 0,
+    benchmark_close: Optional[pd.Series] = None,
+    regime_filter_enabled: bool = False,
+    regime_ma_window: int = 200,
+    regime_vol_window: int = 20,
+    regime_high_vol_threshold: float = 0.02,
+    regime_defensive_exposure: float = 0.3,
 ) -> BacktestResult:
     close_df = close_df.sort_index().ffill().dropna(how="any")
     ret = close_df.pct_change().fillna(0.0)
@@ -224,6 +230,14 @@ def run_rotation_backtest(
         amount_df = amount_df.reindex(ret.index).fillna(0.0)
     else:
         amount_df = pd.DataFrame(index=ret.index, columns=ret.columns, data=0.0)
+
+    bench_close = None
+    bench_ma = None
+    bench_vol = None
+    if benchmark_close is not None:
+        bench_close = pd.Series(benchmark_close).reindex(ret.index).ffill()
+        bench_ma = bench_close.rolling(max(5, int(regime_ma_window))).mean()
+        bench_vol = bench_close.pct_change().rolling(max(5, int(regime_vol_window))).std()
 
     # 风险预算：波动目标 + 回撤保护（按日动态缩放仓位）
     exposure_scale = pd.Series(1.0, index=weights.index, dtype=float)
@@ -256,6 +270,13 @@ def run_rotation_backtest(
             month_peak_equity = float(cur_equity)
 
         scale = 1.0
+
+        if regime_filter_enabled and bench_close is not None and bench_ma is not None and bench_vol is not None:
+            is_bear = bool(bench_close.loc[dt] < bench_ma.loc[dt]) if pd.notna(bench_ma.loc[dt]) else False
+            is_high_vol = bool(bench_vol.loc[dt] >= float(regime_high_vol_threshold)) if pd.notna(bench_vol.loc[dt]) else False
+            if is_bear or is_high_vol:
+                scale *= float(np.clip(regime_defensive_exposure, 0.0, 1.0))
+
         if target_vol_ann is not None and len(net_hist) >= max(vol_target_lookback, 2):
             realized = float(np.std(net_hist[-vol_target_lookback:], ddof=0) * np.sqrt(252))
             if realized > 1e-12:
@@ -383,11 +404,17 @@ def run_from_local_cache(
     daily_loss_stop: Optional[float] = None,
     monthly_drawdown_stop: Optional[float] = None,
     stop_cooldown_days: int = 0,
+    regime_filter_enabled: bool = False,
+    regime_ma_window: int = 200,
+    regime_vol_window: int = 20,
+    regime_high_vol_threshold: float = 0.02,
+    regime_defensive_exposure: float = 0.3,
 ) -> BacktestResult:
     close = load_close_matrix(codes=codes, source=source)
     amount = load_amount_matrix(codes=codes, source=source).reindex(close.index).fillna(0.0)
 
     bench = None
+    bench_close = None
     if benchmark_code is not None:
         bench_close = _load_etf_close(benchmark_code, source=source).reindex(close.index).ffill()
         bench = bench_close.pct_change().fillna(0.0)
@@ -416,6 +443,12 @@ def run_from_local_cache(
         daily_loss_stop=daily_loss_stop,
         monthly_drawdown_stop=monthly_drawdown_stop,
         stop_cooldown_days=stop_cooldown_days,
+        benchmark_close=bench_close,
+        regime_filter_enabled=regime_filter_enabled,
+        regime_ma_window=regime_ma_window,
+        regime_vol_window=regime_vol_window,
+        regime_high_vol_threshold=regime_high_vol_threshold,
+        regime_defensive_exposure=regime_defensive_exposure,
     )
 
 

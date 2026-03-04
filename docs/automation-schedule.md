@@ -7,8 +7,9 @@
 1. 刷新200只ETF候选池（按流动性）
 2. 更新ETF数据缓存（分批冷启动）
 3. 执行Preflight检查（严格模式；FAIL则停止主流程）
-4. 运行纸盘/研究流程并生成报告
-5. 输出风控阈值检查与AI研究审阅报告（默认开启）
+4. 执行T+1一致性校验
+5. 运行纸盘/研究流程并生成报告
+6. 输出系统健康报告 + 风控阈值检查 + AI研究审阅报告
 
 抓数增强说明（免费源）：
 - 默认按 `akshare -> efinance -> tushare -> baostock` 依次回退
@@ -20,6 +21,9 @@
 - 会输出模拟前检查报告：
   - `reports/paper_rotation_preflight.json`
   - `reports/paper_rotation_preflight.md`
+- 会输出T+1一致性与系统健康报告：
+  - `reports/paper_rotation_tplus1_check.json`
+  - `reports/system_health.json`
 
 ## 方式一：任务计划程序（推荐）
 

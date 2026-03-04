@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import json
 import sys
 import time
 from datetime import timedelta
@@ -23,6 +25,9 @@ except Exception:
 
 DATA_DIR = ROOT / "data"
 BENCHMARK_CODES = ["510300", "510500", "159915"]
+REPORTS_DIR = ROOT / "reports"
+VERSIONS_PATH = DATA_DIR / "etf_data_versions.csv"
+FETCH_HISTORY_PATH = REPORTS_DIR / "paper_rotation_fetch_history.csv"
 
 
 def _today_ymd() -> str:
@@ -37,6 +42,7 @@ def _read_existing(code: str) -> pd.DataFrame:
     path = _canonical_path(code)
     if not path.exists():
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "amount"])
+
     try:
         df = pd.read_csv(path)
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -46,6 +52,57 @@ def _read_existing(code: str) -> pd.DataFrame:
         return df.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
     except Exception:
         return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume", "amount"])
+
+
+def _hash_dataframe(df: pd.DataFrame) -> str:
+    if df is None or df.empty:
+        return ""
+    key_cols = [c for c in ["date", "open", "high", "low", "close", "volume", "amount"] if c in df.columns]
+    if not key_cols:
+        return ""
+    sample = df[key_cols].tail(128).copy()
+    if "date" in sample.columns:
+        sample["date"] = pd.to_datetime(sample["date"], errors="coerce").astype(str)
+    payload = sample.to_json(orient="records", force_ascii=False)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_fetched_data(
+    fetched: pd.DataFrame,
+    jump_fail_threshold: float,
+    volume_spike_multiple: float,
+) -> dict:
+    fetched = fetched.copy()
+    fetched["date"] = pd.to_datetime(fetched.get("date"), errors="coerce")
+    fetched = fetched.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    if fetched.empty:
+        raise RuntimeError("empty data after date normalization")
+
+    close = pd.to_numeric(fetched.get("close"), errors="coerce")
+    if close.isna().all():
+        raise RuntimeError("close column all NaN")
+    if bool((close <= 0).fillna(False).any()):
+        raise RuntimeError("close<=0 detected")
+
+    abs_ret = close.pct_change().abs()
+    max_abs_jump = float(abs_ret.max()) if abs_ret.notna().any() else 0.0
+    if max_abs_jump >= jump_fail_threshold:
+        raise RuntimeError(f"extreme jump detected: {max_abs_jump:.4f}")
+
+    volume = pd.to_numeric(fetched.get("volume"), errors="coerce")
+    vol_ratio_max = 0.0
+    if volume.notna().any():
+        rolling_med = volume.rolling(20, min_periods=5).median()
+        ratio = volume / rolling_med.replace(0, pd.NA)
+        ratio = ratio.replace([float("inf"), -float("inf")], pd.NA)
+        vol_ratio_max = float(ratio.max()) if ratio.notna().any() else 0.0
+
+    anomaly_warn = vol_ratio_max >= volume_spike_multiple
+    return {
+        "max_abs_jump": round(max_abs_jump, 6),
+        "volume_ratio_max": round(vol_ratio_max, 4),
+        "anomaly_warn": bool(anomaly_warn),
+    }
 
 
 def _merge_and_save(code: str, old_df: pd.DataFrame, new_df: pd.DataFrame) -> Tuple[Path, int, int]:
@@ -110,6 +167,8 @@ def _fetch_one_code(
     backfill_days: int,
     min_bootstrap_rows: int,
     fresh_tolerance_days: int,
+    jump_fail_threshold: float,
+    volume_spike_multiple: float,
 ) -> Dict:
     existing = _read_existing(code)
     start = _compute_start_date(existing, backfill_days=backfill_days)
@@ -144,6 +203,12 @@ def _fetch_one_code(
                 if fetched is None or fetched.empty:
                     raise RuntimeError("empty data")
 
+                quality_meta = _validate_fetched_data(
+                    fetched=fetched,
+                    jump_fail_threshold=jump_fail_threshold,
+                    volume_spike_multiple=volume_spike_multiple,
+                )
+
                 if existing.empty and len(fetched) < min_bootstrap_rows:
                     raise RuntimeError(f"insufficient bootstrap rows: {len(fetched)} < {min_bootstrap_rows}")
 
@@ -166,12 +231,14 @@ def _fetch_one_code(
                     "rows_after": new_rows,
                     "latest_date": str(pd.to_datetime(fetched["date"].max()).date()),
                     "path": str(out_path),
+                    "quality": quality_meta,
+                    "content_hash": _hash_dataframe(fetched),
                 }
             except Exception as e:
                 err = f"{source}:retry{i+1}:{str(e)[:160]}"
                 errors.append(err)
                 if i < max_retries - 1:
-                    time.sleep(retry_sleep * (i + 1))
+                    time.sleep(retry_sleep * (2**i))
 
     if not existing.empty:
         return {
@@ -197,6 +264,76 @@ def _fetch_one_code(
     }
 
 
+def _save_versions(results: List[Dict], run_id: str) -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    rows = []
+    ts = pd.Timestamp.now().isoformat()
+    for r in results:
+        if r.get("status") not in {"ok", "stale"}:
+            continue
+        quality = r.get("quality", {}) if isinstance(r.get("quality"), dict) else {}
+        rows.append(
+            {
+                "run_id": run_id,
+                "updated_at": ts,
+                "code": r.get("code"),
+                "status": r.get("status"),
+                "source": r.get("source"),
+                "rows_after": r.get("rows_after"),
+                "latest_date": r.get("latest_date"),
+                "content_hash": r.get("content_hash", ""),
+                "max_abs_jump": quality.get("max_abs_jump", None),
+                "volume_ratio_max": quality.get("volume_ratio_max", None),
+                "anomaly_warn": quality.get("anomaly_warn", False),
+            }
+        )
+
+    new_df = pd.DataFrame(rows)
+    if VERSIONS_PATH.exists():
+        try:
+            old_df = pd.read_csv(VERSIONS_PATH)
+            out_df = pd.concat([old_df, new_df], ignore_index=True)
+        except Exception:
+            out_df = new_df
+    else:
+        out_df = new_df
+
+    if not out_df.empty and "updated_at" in out_df.columns:
+        out_df["updated_at"] = pd.to_datetime(out_df["updated_at"], errors="coerce")
+        out_df = out_df.sort_values("updated_at").tail(200000)
+
+    out_df.to_csv(VERSIONS_PATH, index=False)
+    return VERSIONS_PATH
+
+
+def _append_fetch_history(run_id: str, summary: pd.DataFrame, duration_sec: float) -> Path:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    counts = summary["status"].value_counts().to_dict() if not summary.empty else {}
+    payload = {
+        "run_id": run_id,
+        "run_at": pd.Timestamp.now().isoformat(),
+        "duration_sec": round(float(duration_sec), 3),
+        "total": int(len(summary)),
+        "ok": int(counts.get("ok", 0)),
+        "stale": int(counts.get("stale", 0)),
+        "failed": int(counts.get("failed", 0)),
+        "queued": int(counts.get("queued", 0)),
+        "success_ratio": round(float(counts.get("ok", 0) / max(1, len(summary))), 6),
+        "error_total": int(summary["errors"].apply(lambda x: len(x) if isinstance(x, list) else 0).sum()) if "errors" in summary else 0,
+    }
+    row_df = pd.DataFrame([payload])
+    if FETCH_HISTORY_PATH.exists():
+        try:
+            old = pd.read_csv(FETCH_HISTORY_PATH)
+            out = pd.concat([old, row_df], ignore_index=True)
+        except Exception:
+            out = row_df
+    else:
+        out = row_df
+    out.to_csv(FETCH_HISTORY_PATH, index=False)
+    return FETCH_HISTORY_PATH
+
+
 def _iter_codes(custom_codes: Optional[Iterable[str]], universe_size: int) -> List[str]:
     base = list(custom_codes) if custom_codes else load_universe_codes(target_size=universe_size)
     if not base:
@@ -205,18 +342,22 @@ def _iter_codes(custom_codes: Optional[Iterable[str]], universe_size: int) -> Li
 
 
 def main() -> int:
+    t0 = time.time()
+    run_id = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description="Fetch ETF cache with robust free-source fallback")
     parser.add_argument("--codes", nargs="*", default=None, help="Optional ETF code list")
     parser.add_argument("--universe-size", type=int, default=200, help="Universe size when codes not provided")
     parser.add_argument("--limit", type=int, default=0, help="Optional cap on number of codes for quick checks")
     parser.add_argument("--source-order", default="akshare,efinance,tushare,baostock")
-    parser.add_argument("--max-retries", type=int, default=2)
+    parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--retry-sleep", type=float, default=2.0)
     parser.add_argument("--backfill-days", type=int, default=10)
     parser.add_argument("--min-bootstrap-rows", type=int, default=240)
     parser.add_argument("--fresh-tolerance-days", type=int, default=3)
     parser.add_argument("--cooldown", type=float, default=0.3)
     parser.add_argument("--bootstrap-batch-size", type=int, default=20, help="How many new symbols (without local cache) to bootstrap per run")
+    parser.add_argument("--jump-fail-threshold", type=float, default=0.15, help="Fail fetch if absolute daily jump exceeds threshold")
+    parser.add_argument("--volume-spike-multiple", type=float, default=10.0, help="Warn when volume spikes above rolling median multiple")
     parser.add_argument("--strict", action="store_true", help="Return non-zero when failed exists")
     args = parser.parse_args()
 
@@ -241,6 +382,8 @@ def main() -> int:
             backfill_days=max(1, args.backfill_days),
             min_bootstrap_rows=max(1, args.min_bootstrap_rows),
             fresh_tolerance_days=max(0, args.fresh_tolerance_days),
+            jump_fail_threshold=max(0.01, float(args.jump_fail_threshold)),
+            volume_spike_multiple=max(1.0, float(args.volume_spike_multiple)),
         )
         results.append(r)
         print(
@@ -276,12 +419,16 @@ def main() -> int:
     out_json.parent.mkdir(parents=True, exist_ok=True)
     summary.to_json(out_json, orient="records", force_ascii=False, indent=2)
     summary.to_csv(out_csv, index=False)
+    versions_path = _save_versions(results=results, run_id=run_id)
+    history_path = _append_fetch_history(run_id=run_id, summary=summary, duration_sec=time.time() - t0)
 
     print("\nfetch summary:")
     print(f"- ok: {ok_n}")
     print(f"- stale: {stale_n}")
     print(f"- failed: {fail_n}")
     print(f"- queued: {queued_n}")
+    print(f"- data_versions: {versions_path}")
+    print(f"- fetch_history: {history_path}")
     print(f"- status_json: {out_json}")
     print(f"- status_csv: {out_csv}")
 

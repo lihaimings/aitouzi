@@ -85,6 +85,10 @@
     - `reports/paper_rotation_fetch_status.json`
     - `reports/paper_rotation_preflight.json`
     - `reports/paper_rotation_preflight.md`
+    - `reports/paper_rotation_tplus1_check.json`
+    - `reports/paper_rotation_tplus1_check.md`
+    - `reports/system_health.json`
+    - `reports/system_health.md`
 
 ## 当前程序运行流程（run_paper_rotation）
 1) 自动扫描 `data/` 下可用ETF文件（优先 `etf_*_baostock.csv`）
@@ -94,9 +98,11 @@
 4) 周频调仓，选 topN，叠加仓位上限和成本模型（手续费+滑点+冲击成本）
 5) 执行风险预算层（波动目标 + 回撤保护冷静期）
 5.1) 执行停盘阈值保护（单日亏损/月回撤触发后冷静期降仓）
+5.2) 执行市场状态过滤（基准MA与波动率触发防御仓位）
 6) 输出净值、权重、绩效指标（含 Sharpe/Sortino/Calmar/Alpha）
 7) 生成模拟成交记录（纸盘审计）
 8) 生成 Markdown 日报并通过飞书机器人推送
+8.1) 运行 T+1 一致性校验与系统健康报告
 
 ## 飞书通知配置（App 模式）
 - 在项目根目录 `.env` 配置：

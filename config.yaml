@@ -31,6 +31,12 @@ trading:
     daily_loss_stop: -0.03
     monthly_drawdown_stop: -0.10
     stop_cooldown_days: 3
+  regime_filter:
+    enabled: true
+    ma_window: 200
+    vol_window: 20
+    high_vol_threshold: 0.02
+    defensive_exposure: 0.30
 research:
   ai_review:
     enabled: true
@@ -59,3 +65,9 @@ operations:
     severe_jump_threshold: 0.25
     jump_warn_count: 3
     missing_ratio_warn: 0.01
+  simulation_targets:
+    annual_return_min: 0.08
+    max_drawdown_min: -0.20
+    sharpe_min: 0.80
+  param_freeze:
+    freeze_days: 90

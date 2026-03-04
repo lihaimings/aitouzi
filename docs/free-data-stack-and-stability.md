@@ -15,13 +15,17 @@
 - 新增200只ETF动态池：优先用 `ak.fund_etf_category_sina` 刷新候选列表（按成交额排序）
 - 抓数脚本改为多源回退：`akshare -> efinance -> tushare -> baostock`
 - 每个代码支持重试，失败时保留旧缓存并标记 `stale`
+- 重试为指数退避（默认最多3次），并记录到抓数历史
 - 增加最小历史长度门槛（默认 `240` 行）
+- 增加抓数异常校验：`close<=0` 直接失败，单日跳变超阈值失败，成交量极端放大标记告警
 - 对“本地已新鲜且历史足够”的代码跳过慢回退源，避免任务阻塞
 - 对“无本地缓存”的新标的使用分批冷启动（默认每次10个），避免200只全量首日阻塞
 - 输出抓数状态报告：
   - `reports/paper_rotation_fetch_status.json`
   - `reports/paper_rotation_fetch_status.csv`
+  - `reports/paper_rotation_fetch_history.csv`
   - `reports/paper_rotation_universe_summary.json`
+  - `data/etf_data_versions.csv`
 
 ## 推荐运行参数（免费、稳定优先）
 ```powershell Terminal

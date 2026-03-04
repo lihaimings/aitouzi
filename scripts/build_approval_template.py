@@ -32,10 +32,15 @@ def main():
         "daily_loss_stop": -0.03,
         "monthly_drawdown_stop": -0.10,
         "stop_cooldown_days": 3,
+        "regime_filter_enabled": True,
+        "regime_ma_window": 200,
+        "regime_vol_window": 20,
+        "regime_high_vol_threshold": 0.02,
+        "regime_defensive_exposure": 0.30,
         "max_daily_drawdown": -0.05,
         "max_total_drawdown": -0.15,
         "max_position_weight": 0.60,
-        "_note": "复制为 paper_rotation_approved_params.json 后生效；请人工复核后再启用",
+        "_note": "复制为 paper_rotation_approved_params.json 后生效；请人工复核后再启用。参数冻结默认90天，强制覆盖请运行 apply_approved_template.py --force",
     }
 
     out_path.write_text(json.dumps(base, ensure_ascii=False, indent=2), encoding="utf-8")
