@@ -126,6 +126,8 @@ def main():
 
     cfg_risk_limits = (((cfg.get("trading") or {}).get("risk_limits") or {}) if isinstance(cfg, dict) else {})
     cfg_cost_model = (((cfg.get("trading") or {}).get("cost_model") or {}) if isinstance(cfg, dict) else {})
+    cfg_stop_guard = (((cfg.get("trading") or {}).get("stop_guard") or {}) if isinstance(cfg, dict) else {})
+    cfg_quality = (((cfg.get("operations") or {}).get("quality_redline") or {}) if isinstance(cfg, dict) else {})
     cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
     cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
 
@@ -144,9 +146,21 @@ def main():
         "impact_bps": float(approved_params.get("impact_bps", cfg_cost_model.get("impact_bps", 2.0))),
         "impact_power": float(approved_params.get("impact_power", cfg_cost_model.get("impact_power", 0.5))),
         "impact_bps_cap_mult": float(approved_params.get("impact_bps_cap_mult", cfg_cost_model.get("impact_bps_cap_mult", 5.0))),
+        "daily_loss_stop": float(approved_params.get("daily_loss_stop", cfg_stop_guard.get("daily_loss_stop", -0.03))),
+        "monthly_drawdown_stop": float(approved_params.get("monthly_drawdown_stop", cfg_stop_guard.get("monthly_drawdown_stop", -0.10))),
+        "stop_cooldown_days": int(approved_params.get("stop_cooldown_days", cfg_stop_guard.get("stop_cooldown_days", 3))),
     }
 
-    quality_df = audit_universe(codes=codes, source="baostock", jump_threshold=0.12)
+    quality_df = audit_universe(
+        codes=codes,
+        source="baostock",
+        jump_threshold=0.12,
+        min_rows_fail=int(cfg_quality.get("min_rows_fail", 240)),
+        min_rows_warn=int(cfg_quality.get("min_rows_warn", 500)),
+        severe_jump_threshold=float(cfg_quality.get("severe_jump_threshold", 0.25)),
+        jump_warn_count=int(cfg_quality.get("jump_warn_count", 3)),
+        missing_ratio_warn=float(cfg_quality.get("missing_ratio_warn", 0.01)),
+    )
     quality_csv_path, quality_md_path = save_quality_reports(quality_df, prefix="paper_rotation")
 
     result = run_from_local_cache(
@@ -169,6 +183,9 @@ def main():
         impact_bps=exec_params["impact_bps"],
         impact_power=exec_params["impact_power"],
         impact_bps_cap_mult=exec_params["impact_bps_cap_mult"],
+        daily_loss_stop=exec_params["daily_loss_stop"],
+        monthly_drawdown_stop=exec_params["monthly_drawdown_stop"],
+        stop_cooldown_days=exec_params["stop_cooldown_days"],
     )
 
     risk_limits = RiskLimits(
@@ -345,7 +362,9 @@ def main():
         f"- 成交文件: {fills_path}\n"
         f"- 风险预算缩放: {exposure_path}\n"
         f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
+        f"- 停盘阈值: daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
         f"- 回测总成本: {result.metrics.get('cost_total', 0.0):.4f}（冲击成本 {result.metrics.get('cost_impact', 0.0):.4f}）\n"
+        f"- 停盘触发次数: daily={int(result.metrics.get('stop_trigger_daily', 0))}, monthly={int(result.metrics.get('stop_trigger_monthly', 0))}, total_dd={int(result.metrics.get('stop_trigger_total_dd', 0))}\n"
         f"- 模拟成交总成本: {fill_cost_total:.4f}（冲击成本 {fill_impact_total:.4f}）\n"
         f"- 报告文件: {report_path}\n"
         f"- WalkForward窗口表: {wf_table_path}\n"

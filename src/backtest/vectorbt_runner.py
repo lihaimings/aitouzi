@@ -192,6 +192,9 @@ def run_rotation_backtest(
     impact_bps: float = 0.0,
     impact_power: float = 0.5,
     impact_bps_cap_mult: float = 5.0,
+    daily_loss_stop: Optional[float] = None,
+    monthly_drawdown_stop: Optional[float] = None,
+    stop_cooldown_days: int = 0,
 ) -> BacktestResult:
     close_df = close_df.sort_index().ffill().dropna(how="any")
     ret = close_df.pct_change().fillna(0.0)
@@ -229,7 +232,12 @@ def run_rotation_backtest(
     peak_equity = float(init_cash)
     cur_equity = float(init_cash)
     cooldown = 0
+    month_tag = None
+    month_peak_equity = float(init_cash)
     net_hist: List[float] = []
+    stop_trigger_daily = 0
+    stop_trigger_monthly = 0
+    stop_trigger_total = 0
 
     prev_eff_target = pd.Series(0.0, index=weights.columns)
     prev_eff_exec = pd.Series(0.0, index=weights.columns)
@@ -242,6 +250,10 @@ def run_rotation_backtest(
 
     for dt in weights.index:
         base_target = weights.loc[dt].fillna(0.0).astype(float)
+        cur_month = pd.Timestamp(dt).to_period("M")
+        if month_tag is None or cur_month != month_tag:
+            month_tag = cur_month
+            month_peak_equity = float(cur_equity)
 
         scale = 1.0
         if target_vol_ann is not None and len(net_hist) >= max(vol_target_lookback, 2):
@@ -259,6 +271,19 @@ def run_rotation_backtest(
             elif cur_dd <= drawdown_stop:
                 scale = 0.0
                 cooldown = max(dd_cooldown_days - 1, 0)
+                stop_trigger_total += 1
+
+        if daily_loss_stop is not None and len(net_hist) > 0 and net_hist[-1] <= daily_loss_stop:
+            scale = 0.0
+            cooldown = max(cooldown, max(stop_cooldown_days - 1, 0))
+            stop_trigger_daily += 1
+
+        if monthly_drawdown_stop is not None:
+            month_dd = cur_equity / max(month_peak_equity, 1e-12) - 1.0
+            if month_dd <= monthly_drawdown_stop:
+                scale = 0.0
+                cooldown = max(cooldown, max(stop_cooldown_days - 1, 0))
+                stop_trigger_monthly += 1
 
         exposure_scale.loc[dt] = scale
         eff_target = base_target * scale
@@ -292,6 +317,7 @@ def run_rotation_backtest(
 
         cur_equity *= (1.0 + net_t)
         peak_equity = max(peak_equity, cur_equity)
+        month_peak_equity = max(month_peak_equity, cur_equity)
         net_hist.append(net_t)
 
         prev_eff_target = eff_target
@@ -315,6 +341,9 @@ def run_rotation_backtest(
     metrics["cost_fee_slippage"] = float(fee_slippage_cost.sum())
     metrics["cost_impact"] = float(impact_cost.sum())
     metrics["avg_turnover"] = float(turnover.mean())
+    metrics["stop_trigger_daily"] = float(stop_trigger_daily)
+    metrics["stop_trigger_monthly"] = float(stop_trigger_monthly)
+    metrics["stop_trigger_total_dd"] = float(stop_trigger_total)
 
     return BacktestResult(
         equity=equity,
@@ -351,6 +380,9 @@ def run_from_local_cache(
     impact_bps: float = 0.0,
     impact_power: float = 0.5,
     impact_bps_cap_mult: float = 5.0,
+    daily_loss_stop: Optional[float] = None,
+    monthly_drawdown_stop: Optional[float] = None,
+    stop_cooldown_days: int = 0,
 ) -> BacktestResult:
     close = load_close_matrix(codes=codes, source=source)
     amount = load_amount_matrix(codes=codes, source=source).reindex(close.index).fillna(0.0)
@@ -381,6 +413,9 @@ def run_from_local_cache(
         impact_bps=impact_bps,
         impact_power=impact_power,
         impact_bps_cap_mult=impact_bps_cap_mult,
+        daily_loss_stop=daily_loss_stop,
+        monthly_drawdown_stop=monthly_drawdown_stop,
+        stop_cooldown_days=stop_cooldown_days,
     )
 
 

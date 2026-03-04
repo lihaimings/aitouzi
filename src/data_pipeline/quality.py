@@ -35,6 +35,11 @@ def audit_single_etf(
     code: str,
     source: str = "baostock",
     jump_threshold: float = 0.12,
+    min_rows_fail: int = 240,
+    min_rows_warn: int = 500,
+    severe_jump_threshold: float = 0.25,
+    jump_warn_count: int = 3,
+    missing_ratio_warn: float = 0.01,
 ) -> dict:
     df = _load_df(code=code, source=source)
 
@@ -62,10 +67,23 @@ def audit_single_etf(
         max_abs_jump = float(abs_ret.max()) if abs_ret.notna().any() else 0.0
 
     severity = "PASS"
+    redline_reason = ""
+
     if close_na > 0 or non_positive_close > 0 or dup_dates > 0:
         severity = "FAIL"
-    elif jump_count > 0 or missing_ratio > 0.01:
+        redline_reason = "invalid_close_or_dup_dates"
+    elif rows < int(min_rows_fail):
+        severity = "FAIL"
+        redline_reason = "insufficient_history_fail"
+    elif max_abs_jump >= float(severe_jump_threshold):
+        severity = "FAIL"
+        redline_reason = "extreme_price_jump"
+    elif rows < int(min_rows_warn):
         severity = "WARN"
+        redline_reason = "insufficient_history_warn"
+    elif jump_count > int(jump_warn_count) or missing_ratio > float(missing_ratio_warn):
+        severity = "WARN"
+        redline_reason = "data_quality_warning"
 
     return {
         "code": code,
@@ -80,6 +98,7 @@ def audit_single_etf(
         "jump_count": jump_count,
         "max_abs_jump": round(max_abs_jump, 6),
         "severity": severity,
+        "redline_reason": redline_reason,
     }
 
 
@@ -87,11 +106,27 @@ def audit_universe(
     codes: Iterable[str],
     source: str = "baostock",
     jump_threshold: float = 0.12,
+    min_rows_fail: int = 240,
+    min_rows_warn: int = 500,
+    severe_jump_threshold: float = 0.25,
+    jump_warn_count: int = 3,
+    missing_ratio_warn: float = 0.01,
 ) -> pd.DataFrame:
     rows: List[dict] = []
     for code in codes:
         try:
-            rows.append(audit_single_etf(code=code, source=source, jump_threshold=jump_threshold))
+            rows.append(
+                audit_single_etf(
+                    code=code,
+                    source=source,
+                    jump_threshold=jump_threshold,
+                    min_rows_fail=min_rows_fail,
+                    min_rows_warn=min_rows_warn,
+                    severe_jump_threshold=severe_jump_threshold,
+                    jump_warn_count=jump_warn_count,
+                    missing_ratio_warn=missing_ratio_warn,
+                )
+            )
         except Exception as e:
             rows.append(
                 {
@@ -107,6 +142,7 @@ def audit_universe(
                     "jump_count": 0,
                     "max_abs_jump": 0.0,
                     "severity": "FAIL",
+                    "redline_reason": "load_error",
                     "error": str(e),
                 }
             )
@@ -127,6 +163,7 @@ def audit_universe(
         "jump_count",
         "max_abs_jump",
         "severity",
+        "redline_reason",
         "error",
     ]
     for c in order_cols:
@@ -152,15 +189,15 @@ def render_quality_markdown(df: pd.DataFrame) -> str:
         f"- WARN: {warn_n}",
         f"- FAIL: {fail_n}\n",
         "## 明细\n",
-        "| code | rows | start | end | miss% | dup | close_na | nonpos_close | jump_count | max_abs_jump | severity |",
-        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---|",
+        "| code | rows | start | end | miss% | dup | close_na | nonpos_close | jump_count | max_abs_jump | severity | reason |",
+        "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
 
     for _, r in df.iterrows():
         lines.append(
             f"| {r['code']} | {int(r['rows'])} | {r['start_date']} | {r['end_date']} | {float(r['missing_ratio'])*100:.2f}% | "
             f"{int(r['dup_dates'])} | {int(r['close_na'])} | {int(r['non_positive_close'])} | {int(r['jump_count'])} | "
-            f"{float(r['max_abs_jump'])*100:.2f}% | {r['severity']} |"
+            f"{float(r['max_abs_jump'])*100:.2f}% | {r['severity']} | {r.get('redline_reason', '')} |"
         )
 
     return "\n".join(lines) + "\n"

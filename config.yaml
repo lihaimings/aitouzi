@@ -27,6 +27,10 @@ trading:
     impact_bps: 2.0
     impact_power: 0.5
     impact_bps_cap_mult: 5.0
+  stop_guard:
+    daily_loss_stop: -0.03
+    monthly_drawdown_stop: -0.10
+    stop_cooldown_days: 3
 research:
   ai_review:
     enabled: true
@@ -42,3 +46,16 @@ report:
     daily: true
     weekly: true
     monthly: true
+operations:
+  preflight:
+    fresh_days: 5
+    min_rows: 240
+    min_usable_ratio_fail: 0.03
+    min_usable_ratio_warn: 0.10
+    min_usable_count_fail: 5
+  quality_redline:
+    min_rows_fail: 240
+    min_rows_warn: 500
+    severe_jump_threshold: 0.25
+    jump_warn_count: 3
+    missing_ratio_warn: 0.01

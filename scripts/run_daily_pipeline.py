@@ -45,6 +45,9 @@ def main():
     )
 
     # 3) 运行研究/纸盘主流程
+    _run_step([py, "scripts/run_preflight_check.py", "--strict", "--push"])
+
+    # 4) 运行研究/纸盘主流程
     _run_step([py, "scripts/run_paper_rotation.py"])
 
     print("\n[done] daily pipeline finished")

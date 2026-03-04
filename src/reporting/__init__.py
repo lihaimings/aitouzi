@@ -41,6 +41,10 @@ def render_markdown_report(
         extra_lines += f"- 冲击成本（权重口径）：{metrics.get('cost_impact', 0.0):.4f}\n"
     if "avg_turnover" in metrics:
         extra_lines += f"- 平均换手（单日）：{metrics.get('avg_turnover', 0.0):.2%}\n"
+    if "stop_trigger_daily" in metrics:
+        extra_lines += f"- 停盘触发（单日亏损）：{int(metrics.get('stop_trigger_daily', 0))}\n"
+    if "stop_trigger_monthly" in metrics:
+        extra_lines += f"- 停盘触发（月回撤）：{int(metrics.get('stop_trigger_monthly', 0))}\n"
 
     return (
         "# AI 投资策略日报（纸盘）\n\n"

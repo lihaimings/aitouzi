@@ -83,13 +83,17 @@
     - `reports/paper_rotation_monthly_review.md`（运行月度复盘脚本后生成）
     - `reports/paper_rotation_fetch_status.csv`
     - `reports/paper_rotation_fetch_status.json`
+    - `reports/paper_rotation_preflight.json`
+    - `reports/paper_rotation_preflight.md`
 
 ## 当前程序运行流程（run_paper_rotation）
 1) 自动扫描 `data/` 下可用ETF文件（优先 `etf_*_baostock.csv`）
 2) 先执行数据质量审计（缺失/重复日期/异常跳变）并产出质量报告
+2.1) 执行模拟前检查（数据抓取状态/缓存覆盖/基准新鲜度），输出 PASS/WARN/FAIL
 3) 读取收盘价矩阵并计算轮动打分（20/60日动量）
 4) 周频调仓，选 topN，叠加仓位上限和成本模型（手续费+滑点+冲击成本）
 5) 执行风险预算层（波动目标 + 回撤保护冷静期）
+5.1) 执行停盘阈值保护（单日亏损/月回撤触发后冷静期降仓）
 6) 输出净值、权重、绩效指标（含 Sharpe/Sortino/Calmar/Alpha）
 7) 生成模拟成交记录（纸盘审计）
 8) 生成 Markdown 日报并通过飞书机器人推送
