@@ -59,6 +59,7 @@
    - 默认每天 `18:30` 自动执行一次 `scripts/run_daily_pipeline.py`
    - 日志文件：`logs/daily_runner.log`
    - 停止运行：双击 `stop_daily_runner.bat`
+   - 通知策略：默认仅异常告警，周度脚本发送收益摘要（文字）
 4) 也可单独运行纸盘脚本：
    - `python scripts/run_paper_rotation.py`
 5) 查看输出：

@@ -174,7 +174,8 @@ def _render_markdown(final_status: str, parts: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run preflight checks before paper simulation")
     parser.add_argument("--strict", action="store_true", help="Exit non-zero on FAIL")
-    parser.add_argument("--push", action="store_true", help="Push preflight result to Feishu")
+    parser.add_argument("--push", action="store_true", help="Always push preflight result")
+    parser.add_argument("--push-on-warn", action="store_true", help="Push only when status is WARN/FAIL")
     args = parser.parse_args()
 
     cfg = _load_config()
@@ -208,10 +209,15 @@ def main() -> int:
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(_render_markdown(final_status, parts), encoding="utf-8")
 
-    text = f"Preflight={final_status} | json={json_path} | md={md_path}"
+    detail = parts.get("fetch_status", {}).get("stats", {})
+    text = (
+        f"Preflight={final_status} | fetch_total={detail.get('total', 0)} | "
+        f"failed={detail.get('counts', {}).get('failed', 0)} | queued={detail.get('counts', {}).get('queued', 0)}"
+    )
     print(text)
 
-    if args.push:
+    should_push = bool(args.push) or (bool(args.push_on_warn) and final_status in {"WARN", "FAIL"})
+    if should_push:
         try:
             push_dm(text)
         except Exception as e:

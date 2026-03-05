@@ -1,4 +1,5 @@
 import json
+import argparse
 import sys
 from pathlib import Path
 
@@ -10,6 +11,35 @@ sys.path.insert(0, str(ROOT))
 from src.reporting.feishu_push import push_dm
 
 REPORTS = ROOT / "reports"
+STATE_PATH = REPORTS / "system_health_state.json"
+
+
+def _load_config() -> dict:
+    cfg_path = ROOT / "config.yaml"
+    if not cfg_path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore
+
+        d = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_state() -> dict:
+    if not STATE_PATH.exists():
+        return {"red_streak": 0, "last_status": "UNKNOWN", "last_alert_streak": 0}
+    try:
+        d = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {"red_streak": 0, "last_status": "UNKNOWN", "last_alert_streak": 0}
+    except Exception:
+        return {"red_streak": 0, "last_status": "UNKNOWN", "last_alert_streak": 0}
+
+
+def _save_state(state: dict) -> None:
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _safe_read_csv(path: Path) -> pd.DataFrame:
@@ -31,6 +61,14 @@ def _safe_read_json(path: Path) -> dict:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Build and optionally push system health")
+    parser.add_argument("--weekly", action="store_true", help="Force weekly summary push")
+    args = parser.parse_args()
+
+    cfg = _load_config()
+    health_cfg = (((cfg.get("operations") or {}).get("health_alert") or {}) if isinstance(cfg, dict) else {})
+    red_days = int(health_cfg.get("consecutive_red_days", 2))
+
     fetch_status = _safe_read_csv(REPORTS / "paper_rotation_fetch_status.csv")
     fetch_history = _safe_read_csv(REPORTS / "paper_rotation_fetch_history.csv")
     preflight = _safe_read_json(REPORTS / "paper_rotation_preflight.json")
@@ -85,6 +123,15 @@ def main() -> int:
         },
     }
 
+    state = _load_state()
+    red_streak = int(state.get("red_streak", 0))
+    if health_status == "RED":
+        red_streak += 1
+    else:
+        red_streak = 0
+        state["last_alert_streak"] = 0
+    payload["consecutive_red_days"] = red_streak
+
     REPORTS.mkdir(parents=True, exist_ok=True)
     json_path = REPORTS / "system_health.json"
     md_path = REPORTS / "system_health.md"
@@ -101,10 +148,29 @@ def main() -> int:
 
     summary = f"SystemHealth={health_status} | preflight={preflight_status} | ok={ok}/{total} | failed={failed} | queued={queued}"
     print(summary)
-    try:
-        push_dm(summary)
-    except Exception as e:
-        print(f"[warn] health push failed: {e}")
+
+    should_push = False
+    if args.weekly:
+        should_push = True
+    elif health_status == "RED" and red_streak >= max(1, red_days):
+        last_alert_streak = int(state.get("last_alert_streak", 0))
+        if red_streak > last_alert_streak:
+            should_push = True
+            state["last_alert_streak"] = red_streak
+
+    state["red_streak"] = red_streak
+    state["last_status"] = health_status
+    _save_state(state)
+
+    if should_push:
+        alert_text = (
+            f"系统健康告警: 连续{red_streak}天RED，请暂停观察\n"
+            f"preflight={preflight_status}, 抓数: ok={ok}/{total}, failed={failed}, queued={queued}"
+        )
+        try:
+            push_dm(alert_text)
+        except Exception as e:
+            print(f"[warn] health push failed: {e}")
 
     return 0
 

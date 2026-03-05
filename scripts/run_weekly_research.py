@@ -51,6 +51,8 @@ def _build_weekly_markdown() -> Path:
     recommendation = _safe_read_json(REPORTS / "paper_rotation_research_recommendation.json")
     ai_review = _safe_read_json(REPORTS / "paper_rotation_ai_review.json")
 
+    equity = _safe_read_csv(REPORTS / "paper_rotation_equity.csv")
+
     lines = ["# 周度研究复盘（自动生成）\n"]
 
     if not quality.empty and "severity" in quality.columns:
@@ -71,6 +73,14 @@ def _build_weekly_markdown() -> Path:
         lines.append(f"- 阶段最佳超额: {top}")
 
     lines.append(f"- AI总结: {ai_review.get('overall_assessment', '无')}")
+
+    weekly_return = None
+    if not equity.empty and "equity" in equity.columns:
+        eq = pd.to_numeric(equity["equity"], errors="coerce").dropna()
+        if len(eq) >= 2:
+            lookback = min(5, len(eq) - 1)
+            weekly_return = float(eq.iloc[-1] / eq.iloc[-1 - lookback] - 1.0)
+            lines.append(f"- 最近{lookback}个交易日收益: {weekly_return:.2%}")
 
     lines.extend(
         [
@@ -106,11 +116,23 @@ def main():
 
     # 3) 生成周报并推送
     weekly_path = _build_weekly_markdown()
+    risk_guard = _safe_read_json(REPORTS / "paper_rotation_risk_guardrails.json")
+    recommendation = _safe_read_json(REPORTS / "paper_rotation_research_recommendation.json")
+    equity = _safe_read_csv(REPORTS / "paper_rotation_equity.csv")
+
+    weekly_return_text = "NA"
+    if not equity.empty and "equity" in equity.columns:
+        eq = pd.to_numeric(equity["equity"], errors="coerce").dropna()
+        if len(eq) >= 2:
+            lookback = min(5, len(eq) - 1)
+            weekly_return_text = f"{float(eq.iloc[-1] / eq.iloc[-1 - lookback] - 1.0):.2%}"
+
     text = (
-        "周度研究复盘已完成\n"
-        f"- 周报: {weekly_path}\n"
-        f"- 风控检查: {REPORTS / 'paper_rotation_risk_guardrails.md'}\n"
-        f"- AI研究: {REPORTS / 'paper_rotation_ai_review.md'}"
+        "周度收益播报\n"
+        f"- 最近一周收益: {weekly_return_text}\n"
+        f"- 风控状态: {risk_guard.get('status', 'UNKNOWN')}\n"
+        f"- 风控失败项: {risk_guard.get('fail_items', [])}\n"
+        f"- 研究建议: {recommendation.get('decision', 'HOLD')}"
     )
     print(text)
     push_dm(text)

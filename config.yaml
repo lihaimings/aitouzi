@@ -71,3 +71,9 @@ operations:
     sharpe_min: 0.80
   param_freeze:
     freeze_days: 90
+  notify:
+    push_daily_detail: false
+    push_on_anomaly: true
+    quality_fail_alert_count: 6
+  health_alert:
+    consecutive_red_days: 2

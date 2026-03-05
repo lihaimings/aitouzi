@@ -130,6 +130,7 @@ def main():
     cfg_regime_filter = (((cfg.get("trading") or {}).get("regime_filter") or {}) if isinstance(cfg, dict) else {})
     cfg_quality = (((cfg.get("operations") or {}).get("quality_redline") or {}) if isinstance(cfg, dict) else {})
     cfg_targets = (((cfg.get("operations") or {}).get("simulation_targets") or {}) if isinstance(cfg, dict) else {})
+    cfg_notify = (((cfg.get("operations") or {}).get("notify") or {}) if isinstance(cfg, dict) else {})
     cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
     cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
 
@@ -425,7 +426,33 @@ def main():
         f"{baseline_text}"
     )
     print(summary)
-    push_dm(summary)
+
+    severe_anomaly = False
+    severe_reasons = []
+    if risk_review.get("status") == "FAIL":
+        severe_anomaly = True
+        severe_reasons.append("risk_guard_fail")
+    if int(result.metrics.get("stop_trigger_daily", 0)) > 0 or int(result.metrics.get("stop_trigger_monthly", 0)) > 0:
+        severe_anomaly = True
+        severe_reasons.append("stop_guard_triggered")
+    if int((quality_df["severity"] == "FAIL").sum()) >= int(cfg_notify.get("quality_fail_alert_count", 6)):
+        severe_anomaly = True
+        severe_reasons.append("quality_fail_count_high")
+
+    push_daily_detail = bool(cfg_notify.get("push_daily_detail", False))
+    push_on_anomaly = bool(cfg_notify.get("push_on_anomaly", True))
+
+    if push_daily_detail or (push_on_anomaly and severe_anomaly):
+        msg = (
+            f"日度结果: 年化={result.metrics.get('annual_return', 0.0):.2%}, "
+            f"回撤={result.metrics.get('max_drawdown', 0.0):.2%}, "
+            f"Sharpe={result.metrics.get('sharpe', 0.0):.2f}, "
+            f"Alpha={result.metrics.get('alpha_annual', 0.0):.2%}, "
+            f"成本={result.metrics.get('cost_total', 0.0):.4f}"
+        )
+        if severe_anomaly:
+            msg += f"\n异常: {severe_reasons}"
+        push_dm(msg)
 
 
 if __name__ == "__main__":

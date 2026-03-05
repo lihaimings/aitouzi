@@ -28,6 +28,7 @@ BENCHMARK_CODES = ["510300", "510500", "159915"]
 REPORTS_DIR = ROOT / "reports"
 VERSIONS_PATH = DATA_DIR / "etf_data_versions.csv"
 FETCH_HISTORY_PATH = REPORTS_DIR / "paper_rotation_fetch_history.csv"
+WEIGHTS_PATH = REPORTS_DIR / "paper_rotation_weights.csv"
 
 
 def _today_ymd() -> str:
@@ -335,10 +336,45 @@ def _append_fetch_history(run_id: str, summary: pd.DataFrame, duration_sec: floa
 
 
 def _iter_codes(custom_codes: Optional[Iterable[str]], universe_size: int) -> List[str]:
+    def normalize(code: str) -> str:
+        s = str(code).strip()
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s.zfill(6) if s.isdigit() else s
+
+    def held_codes() -> List[str]:
+        if not WEIGHTS_PATH.exists():
+            return []
+        try:
+            w = pd.read_csv(WEIGHTS_PATH)
+            if "date" in w.columns:
+                w = w.drop(columns=["date"])
+            if w.empty:
+                return []
+            last = w.iloc[-1]
+            pos = []
+            for k, v in last.items():
+                try:
+                    if float(v) > 0:
+                        pos.append(normalize(str(k)))
+                except Exception:
+                    continue
+            return pos
+        except Exception:
+            return []
+
     base = list(custom_codes) if custom_codes else load_universe_codes(target_size=universe_size)
     if not base:
         base = list(ETF_LIST)
-    return sorted(set(base + BENCHMARK_CODES))
+
+    ordered: List[str] = []
+    seen = set()
+    for code in held_codes() + [normalize(c) for c in base] + BENCHMARK_CODES:
+        c = normalize(code)
+        if len(c) == 6 and c.isdigit() and c not in seen:
+            ordered.append(c)
+            seen.add(c)
+    return ordered
 
 
 def main() -> int:

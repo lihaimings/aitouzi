@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ REPORTS = ROOT / "reports"
 LOGS = ROOT / "logs"
 STATE_PATH = REPORTS / "daily_runner_state.json"
 STOP_FLAG = REPORTS / "STOP_DAILY_RUNNER"
+LOCK_PATH = REPORTS / "daily_runner.lock"
 
 
 @dataclass
@@ -53,6 +55,41 @@ def _log_line(message: str) -> None:
     print(line, flush=True)
     with log_path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _acquire_lock() -> bool:
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    if LOCK_PATH.exists():
+        try:
+            payload = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+            pid = int(payload.get("pid", 0))
+            if _pid_alive(pid):
+                _log_line(f"Another runner is already running (pid={pid}), exit.")
+                return False
+        except Exception:
+            pass
+
+    payload = {"pid": os.getpid(), "started_at": datetime.now().isoformat()}
+    LOCK_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
+
+
+def _release_lock() -> None:
+    try:
+        if LOCK_PATH.exists():
+            LOCK_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _parse_time(time_str: str) -> tuple[int, int]:
@@ -94,53 +131,59 @@ def main() -> int:
     target_h, target_m = _parse_time(args.time)
     state = _load_state()
 
+    if not _acquire_lock():
+        return 1
+
     _log_line("Daily runner started")
     _log_line(f"Target time: {args.time}")
 
     if STOP_FLAG.exists():
         STOP_FLAG.unlink(missing_ok=True)
 
-    if args.run_on_start:
-        code = _run_daily_pipeline(args.python_exe)
-        state.total_runs += 1
-        state.last_run_at = datetime.now().isoformat()
-        state.last_code = code
-        state.last_status = "ok" if code == 0 else "failed"
-        _save_state(state)
-        if args.no_loop:
-            return code
-
-    if args.no_loop:
-        _log_line("No-loop mode enabled, exit")
-        return 0
-
-    last_trigger_date = ""
-    while True:
-        if STOP_FLAG.exists():
-            _log_line(f"Stop flag detected: {STOP_FLAG}")
-            STOP_FLAG.unlink(missing_ok=True)
-            break
-
-        now = datetime.now()
-        trigger = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
-        today = now.strftime("%Y-%m-%d")
-
-        if now >= trigger and last_trigger_date != today:
+    try:
+        if args.run_on_start:
             code = _run_daily_pipeline(args.python_exe)
             state.total_runs += 1
             state.last_run_at = datetime.now().isoformat()
             state.last_code = code
             state.last_status = "ok" if code == 0 else "failed"
             _save_state(state)
-            last_trigger_date = today
+            if args.no_loop:
+                return code
 
-        nxt = _next_run(datetime.now(), target_h, target_m)
-        wait_sec = int((nxt - datetime.now()).total_seconds())
-        _log_line(f"Next run at {nxt.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_sec}s)")
-        time.sleep(min(60, max(5, wait_sec)))
+        if args.no_loop:
+            _log_line("No-loop mode enabled, exit")
+            return 0
 
-    _log_line("Daily runner stopped")
-    return 0
+        last_trigger_date = ""
+        while True:
+            if STOP_FLAG.exists():
+                _log_line(f"Stop flag detected: {STOP_FLAG}")
+                STOP_FLAG.unlink(missing_ok=True)
+                break
+
+            now = datetime.now()
+            trigger = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
+            today = now.strftime("%Y-%m-%d")
+
+            if now >= trigger and last_trigger_date != today:
+                code = _run_daily_pipeline(args.python_exe)
+                state.total_runs += 1
+                state.last_run_at = datetime.now().isoformat()
+                state.last_code = code
+                state.last_status = "ok" if code == 0 else "failed"
+                _save_state(state)
+                last_trigger_date = today
+
+            nxt = _next_run(datetime.now(), target_h, target_m)
+            wait_sec = int((nxt - datetime.now()).total_seconds())
+            _log_line(f"Next run at {nxt.strftime('%Y-%m-%d %H:%M:%S')} (in {wait_sec}s)")
+            time.sleep(min(60, max(5, wait_sec)))
+
+        _log_line("Daily runner stopped")
+        return 0
+    finally:
+        _release_lock()
 
 
 if __name__ == "__main__":

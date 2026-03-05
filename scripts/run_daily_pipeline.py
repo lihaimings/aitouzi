@@ -45,7 +45,7 @@ def main():
     )
 
     # 3) 运行研究/纸盘主流程
-    _run_step([py, "scripts/run_preflight_check.py", "--strict", "--push"])
+    _run_step([py, "scripts/run_preflight_check.py", "--strict"])
 
     # 4) T+1 机制一致性校验
     _run_step([py, "scripts/run_tplus1_check.py"])
