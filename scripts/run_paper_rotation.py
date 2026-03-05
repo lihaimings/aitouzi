@@ -618,6 +618,16 @@ def main():
 
     push_daily_detail = bool(cfg_notify.get("push_daily_detail", False))
     push_on_anomaly = bool(cfg_notify.get("push_on_anomaly", True))
+    push_trade_changes = bool(cfg_notify.get("push_trade_changes", True))
+
+    trade_buys = []
+    trade_sells = []
+    if len(result.weights) >= 2:
+        cur_w = pd.to_numeric(result.weights.iloc[-1], errors="coerce").fillna(0.0)
+        prev_w = pd.to_numeric(result.weights.iloc[-2], errors="coerce").fillna(0.0)
+        delta_w = (cur_w - prev_w).sort_values(ascending=False)
+        trade_buys = [(str(k), float(v)) for k, v in delta_w.items() if v > 1e-4]
+        trade_sells = [(str(k), float(-v)) for k, v in delta_w.items() if v < -1e-4]
 
     if push_daily_detail or (push_on_anomaly and severe_anomaly):
         msg = (
@@ -630,6 +640,14 @@ def main():
         if severe_anomaly:
             msg += f"\n异常: {severe_reasons}"
         push_dm(msg)
+
+    if push_trade_changes and (trade_buys or trade_sells):
+        trade_text = (
+            "调仓提醒\n"
+            f"- 买入: {', '.join([f'{c}(+{w:.1%})' for c, w in trade_buys[:6]]) if trade_buys else '无'}\n"
+            f"- 卖出: {', '.join([f'{c}(-{w:.1%})' for c, w in trade_sells[:6]]) if trade_sells else '无'}"
+        )
+        push_dm(trade_text)
 
 
 if __name__ == "__main__":

@@ -163,8 +163,9 @@ def main() -> int:
     _save_state(state)
 
     if should_push:
+        zh = {"GREEN": "绿色", "YELLOW": "黄色", "RED": "红色"}
         alert_text = (
-            f"系统健康告警: 连续{red_streak}天RED，请暂停观察\n"
+            f"系统健康告警: 连续{red_streak}天{zh.get(health_status, health_status)}，建议暂停观察\n"
             f"preflight={preflight_status}, 抓数: ok={ok}/{total}, failed={failed}, queued={queued}"
         )
         try:

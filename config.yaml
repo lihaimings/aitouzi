@@ -112,6 +112,7 @@ operations:
   notify:
     push_daily_detail: false
     push_on_anomaly: true
+    push_trade_changes: true
     quality_fail_alert_count: 6
   health_alert:
     consecutive_red_days: 2
