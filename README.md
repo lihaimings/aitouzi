@@ -56,13 +56,13 @@
 
 4) 一键长期运行（Windows 双击）：
    - 双击 `start_daily_runner.bat`
-   - 默认每天 `18:30` 自动执行一次 `scripts/run_daily_pipeline.py`
+   - 启动后会立即先执行一次，再在每天 `18:30` 自动执行 `scripts/run_daily_pipeline.py`
    - 日志文件：`logs/daily_runner.log`
    - 停止运行：双击 `stop_daily_runner.bat`
    - 通知策略：默认仅异常告警，周度脚本发送收益摘要（文字）
-4) 也可单独运行纸盘脚本：
+5) 也可单独运行纸盘脚本：
    - `python scripts/run_paper_rotation.py`
-5) 查看输出：
+6) 查看输出：
    - `reports/paper_rotation_equity.csv`
    - `reports/paper_rotation_weights.csv`
    - `reports/paper_rotation_fills.csv`
@@ -97,22 +97,39 @@
     - `reports/system_health.json`
     - `reports/system_health.md`
 
-## 当前程序运行流程（run_paper_rotation）
-1) 自动扫描 `data/` 下可用ETF文件（优先 `etf_*_baostock.csv`）
-2) 先执行数据质量审计（缺失/重复日期/异常跳变）并产出质量报告
-2.1) 执行模拟前检查（数据抓取状态/缓存覆盖/基准新鲜度），输出 PASS/WARN/FAIL
-3) 读取收盘价矩阵并计算轮动打分（20/60日动量）
-4) 周频调仓，选 topN，叠加仓位上限和成本模型（手续费+滑点+冲击成本）
-4.1) 叠加择时开关（中长期趋势同向时放大仓位，逆风时降仓）与自适应TopN（强趋势更集中，弱趋势更分散）
-4.2) 叠加反复打脸抑制（入场确认、买卖阈值分离、最小持有期、再入冷却期）
-4.3) 叠加AI裁判附加层（bullish/neutral/bearish + 置信度 + 风险标签），仅用于小幅调节风险暴露，并输出A/B对比
-5) 执行风险预算层（波动目标 + 回撤保护冷静期）
-5.1) 执行停盘阈值保护（单日亏损/月回撤触发后冷静期降仓）
-5.2) 执行市场状态过滤（基准MA与波动率触发防御仓位）
-6) 输出净值、权重、绩效指标（含 Sharpe/Sortino/Calmar/Alpha）
-7) 生成模拟成交记录（纸盘审计）
-8) 生成 Markdown 日报并通过飞书机器人推送
-8.1) 运行 T+1 一致性校验与系统健康报告
+## 当前程序运行流程（推荐：run_daily_pipeline）
+1) 刷新 ETF 池（目标约 200 只）：`scripts/refresh_etf_universe.py`
+2) 抓取并更新 ETF 数据：`scripts/fetch_etf_cache.py`
+   - 多源回退 + 指数退避重试 + 分批冷启动
+   - 优先更新当前持仓ETF，再更新其他标的
+3) 执行 Preflight 模拟前检查：`scripts/run_preflight_check.py --strict`
+   - 检查抓数状态、缓存覆盖、基准新鲜度（PASS/WARN/FAIL）
+4) 执行 T+1 一致性校验：`scripts/run_tplus1_check.py`
+5) 运行主策略：`scripts/run_paper_rotation.py`
+   - 数据质量审计（缺失/重复/异常跳变/历史长度）
+   - 信号打分（多因子：短动量、长动量、低波动、低回撤）
+   - 调仓执行（周频）与成本建模（手续费/滑点/冲击成本）
+   - 风控层（回撤保护、停盘阈值、市场状态过滤）
+   - 反复打脸抑制（入场确认、买卖阈值分离、最小持有期、再入冷却期）
+   - AI 裁判附加层（仅调节 10%-20% 风险暴露）+ A/B 对比择优启用
+6) 生成报告与推送
+   - 日报/周报/月报、Walk-Forward、参数稳定性、多基准对比、风控报告
+   - 飞书默认仅异常推送；周度发送收益与持仓/买卖文字摘要
+7) 输出系统健康报告：`scripts/run_system_health.py`
+
+## 当前买卖策略（核心规则）
+- 买入：
+  - 在周频调仓日，对ETF池按综合分数排序
+  - 通过入场确认期后，满足买入阈值的标的才可入选
+  - 强趋势时更集中持仓（TopN更小），弱趋势时更分散
+- 卖出：
+  - 持仓分数跌破卖出阈值，或不再满足持仓条件
+  - 触发停盘/回撤保护时，组合整体降仓
+  - 卖出后进入再入冷却期，防止来回追涨杀跌
+- AI 裁判（附加层，不替代主策略）：
+  - 输出 `bullish/neutral/bearish` + 置信度 + 风险标签
+  - 仅用于小幅调节风险暴露（默认上限 15%）
+  - 通过 A/B 对比后，仅在更优时才启用
 
 ## 飞书通知配置（App 模式）
 - 在项目根目录 `.env` 配置：
