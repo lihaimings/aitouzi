@@ -53,6 +53,12 @@
 3) 运行日常流水线（推荐）：
    - `python scripts/run_daily_pipeline.py`
    - （会自动先拉取ETF数据，再执行纸盘/研究流程）
+
+4) 一键长期运行（Windows 双击）：
+   - 双击 `start_daily_runner.bat`
+   - 默认每天 `18:30` 自动执行一次 `scripts/run_daily_pipeline.py`
+   - 日志文件：`logs/daily_runner.log`
+   - 停止运行：双击 `stop_daily_runner.bat`
 4) 也可单独运行纸盘脚本：
    - `python scripts/run_paper_rotation.py`
 5) 查看输出：
