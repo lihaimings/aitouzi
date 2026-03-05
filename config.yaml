@@ -7,6 +7,9 @@ data_source:
   tushare_token: ${TUSHARE_TOKEN}
 llm:
   provider: external_api  # 使用你的大模型API
+  base_url: http://localhost:8317/v1
+  api_key: your-api-key-1
+  model: gpt-5.3-codex
   use_cases:
     - news_summary
     - sentiment
@@ -37,6 +40,41 @@ trading:
     vol_window: 20
     high_vol_threshold: 0.02
     defensive_exposure: 0.30
+  strategy_score:
+    mom_short: 20
+    mom_long: 60
+    vol_window: 20
+    dd_window: 60
+    w_mom_short: 0.50
+    w_mom_long: 0.30
+    w_low_vol: 0.10
+    w_low_drawdown: 0.10
+  timing_switch:
+    enabled: true
+    short_ma: 20
+    long_ma: 120
+    gate_threshold: 0.0
+    amplify_threshold: 0.02
+    amplify_mult: 1.20
+    defensive_scale: 0.50
+  adaptive_top_n:
+    enabled: true
+    top_n_strong: 1
+    top_n_neutral: 2
+    top_n_weak: 4
+    trend_strong_threshold: 0.03
+    trend_weak_threshold: 0.00
+  anti_whipsaw:
+    buy_threshold: -0.05
+    sell_threshold: -0.12
+    entry_confirm_periods: 2
+    min_hold_rebalance_periods: 2
+    reentry_cooldown_periods: 1
+  ai_referee:
+    enabled: true
+    exposure_cap: 0.15
+    max_llm_points: 60
+    apply_if_better: true
 research:
   ai_review:
     enabled: true
@@ -66,7 +104,7 @@ operations:
     jump_warn_count: 3
     missing_ratio_warn: 0.01
   simulation_targets:
-    annual_return_min: 0.08
+    annual_return_min: 0.15
     max_drawdown_min: -0.20
     sharpe_min: 0.80
   param_freeze:

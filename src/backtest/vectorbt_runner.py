@@ -85,15 +85,48 @@ def compute_rotation_score(
     close_df: pd.DataFrame,
     mom_short: int = 20,
     mom_long: int = 60,
+    vol_window: int = 20,
+    dd_window: int = 60,
+    w_mom_short: float = 0.5,
+    w_mom_long: float = 0.3,
+    w_low_vol: float = 0.1,
+    w_low_drawdown: float = 0.1,
 ) -> pd.DataFrame:
     r1 = close_df.pct_change(mom_short)
     r2 = close_df.pct_change(mom_long)
 
-    # 缺少长窗口历史时，自动退化为可用窗口的加权均值
-    w1, w2 = 0.6, 0.4
-    numerator = r1.fillna(0.0) * w1 + r2.fillna(0.0) * w2
-    denominator = (~r1.isna()).astype(float) * w1 + (~r2.isna()).astype(float) * w2
-    score = numerator.div(denominator.where(denominator > 0))
+    vol = close_df.pct_change().rolling(vol_window).std()
+    low_vol = -vol
+
+    roll_max = close_df.rolling(dd_window).max()
+    dd = close_df / roll_max - 1.0
+    low_dd = dd
+
+    fac = {
+        "mom_short": r1,
+        "mom_long": r2,
+        "low_vol": low_vol,
+        "low_drawdown": low_dd,
+    }
+    w = {
+        "mom_short": float(w_mom_short),
+        "mom_long": float(w_mom_long),
+        "low_vol": float(w_low_vol),
+        "low_drawdown": float(w_low_drawdown),
+    }
+
+    total_w = max(sum(max(0.0, x) for x in w.values()), 1e-12)
+    for k in w:
+        w[k] = max(0.0, w[k]) / total_w
+
+    numerator = pd.DataFrame(0.0, index=close_df.index, columns=close_df.columns)
+    denominator = pd.DataFrame(0.0, index=close_df.index, columns=close_df.columns)
+    for k, df in fac.items():
+        wk = w[k]
+        numerator = numerator + df.fillna(0.0) * wk
+        denominator = denominator + (~df.isna()).astype(float) * wk
+
+    score = numerator.div(denominator.where(denominator > 0.0))
     return score
 
 
@@ -102,10 +135,30 @@ def build_target_weights(
     rebalance: str = "W-FRI",
     top_n: int = 2,
     min_score: float = -1.0,
+    buy_threshold: Optional[float] = None,
+    sell_threshold: Optional[float] = None,
     sentiment: Optional[pd.Series] = None,
+    sentiment_exposure_cap: float = 0.15,
     close_df: Optional[pd.DataFrame] = None,
+    trend_close: Optional[pd.Series] = None,
     use_risk_parity: bool = False,
     vol_lookback: int = 20,
+    timing_switch_enabled: bool = False,
+    trend_short_ma: int = 20,
+    trend_long_ma: int = 120,
+    trend_gate_threshold: float = 0.0,
+    trend_amplify_threshold: float = 0.02,
+    trend_amplify_mult: float = 1.2,
+    trend_defensive_scale: float = 0.5,
+    adaptive_top_n_enabled: bool = False,
+    top_n_strong: int = 1,
+    top_n_neutral: int = 2,
+    top_n_weak: int = 4,
+    trend_strong_threshold: float = 0.03,
+    trend_weak_threshold: float = 0.0,
+    entry_confirm_periods: int = 1,
+    min_hold_rebalance_periods: int = 1,
+    reentry_cooldown_periods: int = 0,
 ) -> pd.DataFrame:
     if top_n <= 0:
         raise ValueError("top_n 必须大于 0")
@@ -113,7 +166,31 @@ def build_target_weights(
     rebalance_idx = score.resample(rebalance).last().index
     weights = pd.DataFrame(0.0, index=score.index, columns=score.columns)
 
-    for dt in rebalance_idx:
+    if trend_close is None:
+        if close_df is not None and not close_df.empty:
+            trend_close = close_df.mean(axis=1)
+        else:
+            trend_close = score.mean(axis=1)
+
+    trend_close = pd.Series(trend_close).reindex(score.index).ffill()
+    trend_short = trend_close.rolling(max(5, int(trend_short_ma))).mean()
+    trend_long = trend_close.rolling(max(int(trend_short_ma) + 1, int(trend_long_ma))).mean()
+    trend_strength = trend_short / trend_long - 1.0
+
+    buy_threshold = float(min_score if buy_threshold is None else buy_threshold)
+    sell_threshold = float(min_score if sell_threshold is None else sell_threshold)
+    entry_confirm_periods = max(1, int(entry_confirm_periods))
+    min_hold_rebalance_periods = max(1, int(min_hold_rebalance_periods))
+    reentry_cooldown_periods = max(0, int(reentry_cooldown_periods))
+
+    above_buy = score >= buy_threshold
+    confirm_ok = above_buy.rolling(entry_confirm_periods).sum() >= entry_confirm_periods
+
+    entry_step: Dict[str, int] = {}
+    cooldown_until_step: Dict[str, int] = {}
+    current_holdings: set[str] = set()
+
+    for step, dt in enumerate(rebalance_idx):
         if dt not in score.index:
             prior = score.index[score.index <= dt]
             if len(prior) == 0:
@@ -124,14 +201,87 @@ def build_target_weights(
         if row.empty:
             continue
 
-        select = row[row >= min_score].nlargest(top_n)
-        if len(select) == 0:
+        dyn_top_n = int(top_n)
+        cur_trend = float(trend_strength.loc[dt]) if pd.notna(trend_strength.loc[dt]) else 0.0
+        if adaptive_top_n_enabled:
+            if cur_trend >= float(trend_strong_threshold):
+                dyn_top_n = int(top_n_strong)
+            elif cur_trend <= float(trend_weak_threshold):
+                dyn_top_n = int(top_n_weak)
+            else:
+                dyn_top_n = int(top_n_neutral)
+
+        dyn_top_n = max(1, dyn_top_n)
+        buy_mask = confirm_ok.loc[dt].reindex(row.index).fillna(False)
+        buy_candidates = row[buy_mask]
+
+        forced_keep = []
+        optional_keep = []
+        sold_now = []
+        for sym in sorted(current_holdings):
+            s = float(row.get(sym, np.nan)) if sym in row.index else np.nan
+            entry_s = int(entry_step.get(sym, step))
+            held_steps = step - entry_s
+            must_hold = held_steps < min_hold_rebalance_periods
+            if must_hold:
+                forced_keep.append(sym)
+                continue
+
+            if np.isnan(s) or s < sell_threshold:
+                sold_now.append(sym)
+            else:
+                optional_keep.append(sym)
+
+        ranked_new = [
+            sym
+            for sym in buy_candidates.sort_values(ascending=False).index.tolist()
+            if sym not in current_holdings
+            and step >= int(cooldown_until_step.get(sym, -1))
+        ]
+
+        target_symbols = list(forced_keep)
+
+        # 先保留仍然健康的旧持仓，再补新持仓
+        for sym in optional_keep:
+            if len(target_symbols) >= dyn_top_n:
+                break
+            target_symbols.append(sym)
+
+        for sym in ranked_new:
+            if len(target_symbols) >= dyn_top_n:
+                break
+            target_symbols.append(sym)
+
+        if len(target_symbols) == 0:
+            current_holdings = set()
+            for sym in sold_now:
+                cooldown_until_step[sym] = step + reentry_cooldown_periods
+            weights.loc[dt] = pd.Series(0.0, index=score.columns)
+            continue
+
+        # 若forced持仓超过dyn_top_n，允许临时超限，防止刚买就卖
+        target_symbols = list(dict.fromkeys(target_symbols + forced_keep))
+        select = row.reindex(target_symbols).dropna()
+        if select.empty:
+            current_holdings = set()
+            weights.loc[dt] = pd.Series(0.0, index=score.columns)
             continue
 
         risk_scale = 1.0
         if sentiment is not None:
             s = sentiment.reindex(score.index).ffill().fillna(0.0)
-            risk_scale = float(np.clip((s.loc[dt] + 1.0) / 2.0, 0.0, 1.0))
+            sent = float(np.clip(float(s.loc[dt]), -1.0, 1.0))
+            cap = float(np.clip(sentiment_exposure_cap, 0.0, 0.5))
+            risk_scale *= float(np.clip(1.0 + sent * cap, 1.0 - cap, 1.0 + cap))
+
+        if timing_switch_enabled:
+            cur = float(trend_strength.loc[dt]) if pd.notna(trend_strength.loc[dt]) else 0.0
+            if cur < float(trend_gate_threshold):
+                risk_scale *= float(np.clip(trend_defensive_scale, 0.0, 1.0))
+            elif cur >= float(trend_amplify_threshold):
+                risk_scale *= float(max(1.0, trend_amplify_mult))
+
+        risk_scale = float(np.clip(risk_scale, 0.0, 1.0))
 
         w = pd.Series(0.0, index=score.columns)
         if use_risk_parity and close_df is not None:
@@ -146,6 +296,15 @@ def build_target_weights(
         else:
             w[select.index] = risk_scale / len(select)
         weights.loc[dt] = w
+
+        new_holding_set = set(select.index.astype(str).tolist())
+        for sym in sold_now:
+            cooldown_until_step[sym] = step + reentry_cooldown_periods
+            entry_step.pop(sym, None)
+        for sym in new_holding_set:
+            if sym not in current_holdings:
+                entry_step[sym] = step
+        current_holdings = new_holding_set
 
     return weights.replace(0, np.nan).ffill().fillna(0.0)
 
@@ -201,20 +360,80 @@ def run_rotation_backtest(
     regime_vol_window: int = 20,
     regime_high_vol_threshold: float = 0.02,
     regime_defensive_exposure: float = 0.3,
+    score_mom_short: int = 20,
+    score_mom_long: int = 60,
+    score_vol_window: int = 20,
+    score_dd_window: int = 60,
+    score_w_mom_short: float = 0.5,
+    score_w_mom_long: float = 0.3,
+    score_w_low_vol: float = 0.1,
+    score_w_low_drawdown: float = 0.1,
+    buy_threshold: Optional[float] = None,
+    sell_threshold: Optional[float] = None,
+    sentiment_exposure_cap: float = 0.15,
+    entry_confirm_periods: int = 1,
+    min_hold_rebalance_periods: int = 1,
+    reentry_cooldown_periods: int = 0,
+    timing_switch_enabled: bool = False,
+    trend_short_ma: int = 20,
+    trend_long_ma: int = 120,
+    trend_gate_threshold: float = 0.0,
+    trend_amplify_threshold: float = 0.02,
+    trend_amplify_mult: float = 1.2,
+    trend_defensive_scale: float = 0.5,
+    adaptive_top_n_enabled: bool = False,
+    top_n_strong: int = 1,
+    top_n_neutral: int = 2,
+    top_n_weak: int = 4,
+    trend_strong_threshold: float = 0.03,
+    trend_weak_threshold: float = 0.0,
 ) -> BacktestResult:
     close_df = close_df.sort_index().ffill().dropna(how="any")
     ret = close_df.pct_change().fillna(0.0)
 
-    score = compute_rotation_score(close_df)
+    score = compute_rotation_score(
+        close_df,
+        mom_short=score_mom_short,
+        mom_long=score_mom_long,
+        vol_window=score_vol_window,
+        dd_window=score_dd_window,
+        w_mom_short=score_w_mom_short,
+        w_mom_long=score_w_mom_long,
+        w_low_vol=score_w_low_vol,
+        w_low_drawdown=score_w_low_drawdown,
+    )
+
+    trend_ref = pd.Series(benchmark_close).reindex(close_df.index).ffill() if benchmark_close is not None else None
+
     weights = build_target_weights(
         score=score,
         rebalance=rebalance,
         top_n=top_n,
         min_score=min_score,
+        buy_threshold=buy_threshold,
+        sell_threshold=sell_threshold,
         sentiment=sentiment,
+        sentiment_exposure_cap=sentiment_exposure_cap,
         close_df=close_df,
+        trend_close=trend_ref,
         use_risk_parity=use_risk_parity,
         vol_lookback=vol_lookback,
+        entry_confirm_periods=entry_confirm_periods,
+        min_hold_rebalance_periods=min_hold_rebalance_periods,
+        reentry_cooldown_periods=reentry_cooldown_periods,
+        timing_switch_enabled=timing_switch_enabled,
+        trend_short_ma=trend_short_ma,
+        trend_long_ma=trend_long_ma,
+        trend_gate_threshold=trend_gate_threshold,
+        trend_amplify_threshold=trend_amplify_threshold,
+        trend_amplify_mult=trend_amplify_mult,
+        trend_defensive_scale=trend_defensive_scale,
+        adaptive_top_n_enabled=adaptive_top_n_enabled,
+        top_n_strong=top_n_strong,
+        top_n_neutral=top_n_neutral,
+        top_n_weak=top_n_weak,
+        trend_strong_threshold=trend_strong_threshold,
+        trend_weak_threshold=trend_weak_threshold,
     )
     weights = cap_weight_and_normalize(weights, max_single_weight=0.6)
 
@@ -409,6 +628,33 @@ def run_from_local_cache(
     regime_vol_window: int = 20,
     regime_high_vol_threshold: float = 0.02,
     regime_defensive_exposure: float = 0.3,
+    score_mom_short: int = 20,
+    score_mom_long: int = 60,
+    score_vol_window: int = 20,
+    score_dd_window: int = 60,
+    score_w_mom_short: float = 0.5,
+    score_w_mom_long: float = 0.3,
+    score_w_low_vol: float = 0.1,
+    score_w_low_drawdown: float = 0.1,
+    buy_threshold: Optional[float] = None,
+    sell_threshold: Optional[float] = None,
+    sentiment_exposure_cap: float = 0.15,
+    entry_confirm_periods: int = 1,
+    min_hold_rebalance_periods: int = 1,
+    reentry_cooldown_periods: int = 0,
+    timing_switch_enabled: bool = False,
+    trend_short_ma: int = 20,
+    trend_long_ma: int = 120,
+    trend_gate_threshold: float = 0.0,
+    trend_amplify_threshold: float = 0.02,
+    trend_amplify_mult: float = 1.2,
+    trend_defensive_scale: float = 0.5,
+    adaptive_top_n_enabled: bool = False,
+    top_n_strong: int = 1,
+    top_n_neutral: int = 2,
+    top_n_weak: int = 4,
+    trend_strong_threshold: float = 0.03,
+    trend_weak_threshold: float = 0.0,
 ) -> BacktestResult:
     close = load_close_matrix(codes=codes, source=source)
     amount = load_amount_matrix(codes=codes, source=source).reindex(close.index).fillna(0.0)
@@ -449,6 +695,33 @@ def run_from_local_cache(
         regime_vol_window=regime_vol_window,
         regime_high_vol_threshold=regime_high_vol_threshold,
         regime_defensive_exposure=regime_defensive_exposure,
+        score_mom_short=score_mom_short,
+        score_mom_long=score_mom_long,
+        score_vol_window=score_vol_window,
+        score_dd_window=score_dd_window,
+        score_w_mom_short=score_w_mom_short,
+        score_w_mom_long=score_w_mom_long,
+        score_w_low_vol=score_w_low_vol,
+        score_w_low_drawdown=score_w_low_drawdown,
+        buy_threshold=buy_threshold,
+        sell_threshold=sell_threshold,
+        sentiment_exposure_cap=sentiment_exposure_cap,
+        entry_confirm_periods=entry_confirm_periods,
+        min_hold_rebalance_periods=min_hold_rebalance_periods,
+        reentry_cooldown_periods=reentry_cooldown_periods,
+        timing_switch_enabled=timing_switch_enabled,
+        trend_short_ma=trend_short_ma,
+        trend_long_ma=trend_long_ma,
+        trend_gate_threshold=trend_gate_threshold,
+        trend_amplify_threshold=trend_amplify_threshold,
+        trend_amplify_mult=trend_amplify_mult,
+        trend_defensive_scale=trend_defensive_scale,
+        adaptive_top_n_enabled=adaptive_top_n_enabled,
+        top_n_strong=top_n_strong,
+        top_n_neutral=top_n_neutral,
+        top_n_weak=top_n_weak,
+        trend_strong_threshold=trend_strong_threshold,
+        trend_weak_threshold=trend_weak_threshold,
     )
 
 

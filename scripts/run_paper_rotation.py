@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.backtest.vectorbt_runner import (
     load_amount_matrix,
+    load_close_matrix,
     run_from_local_cache,
     run_walk_forward_from_local_cache,
     save_backtest_outputs,
@@ -29,8 +30,11 @@ from src.research import (
     build_ai_research_review,
     build_regime_review,
     build_research_recommendation,
+    build_ai_referee_signals,
     evaluate_risk_guardrails,
     pick_regime_key_insight,
+    save_ab_compare,
+    save_ai_referee_outputs,
     save_ai_research_review,
     save_regime_review,
     save_research_recommendation,
@@ -128,6 +132,11 @@ def main():
     cfg_cost_model = (((cfg.get("trading") or {}).get("cost_model") or {}) if isinstance(cfg, dict) else {})
     cfg_stop_guard = (((cfg.get("trading") or {}).get("stop_guard") or {}) if isinstance(cfg, dict) else {})
     cfg_regime_filter = (((cfg.get("trading") or {}).get("regime_filter") or {}) if isinstance(cfg, dict) else {})
+    cfg_strategy_score = (((cfg.get("trading") or {}).get("strategy_score") or {}) if isinstance(cfg, dict) else {})
+    cfg_timing_switch = (((cfg.get("trading") or {}).get("timing_switch") or {}) if isinstance(cfg, dict) else {})
+    cfg_adaptive_top_n = (((cfg.get("trading") or {}).get("adaptive_top_n") or {}) if isinstance(cfg, dict) else {})
+    cfg_anti_whipsaw = (((cfg.get("trading") or {}).get("anti_whipsaw") or {}) if isinstance(cfg, dict) else {})
+    cfg_ai_referee = (((cfg.get("trading") or {}).get("ai_referee") or {}) if isinstance(cfg, dict) else {})
     cfg_quality = (((cfg.get("operations") or {}).get("quality_redline") or {}) if isinstance(cfg, dict) else {})
     cfg_targets = (((cfg.get("operations") or {}).get("simulation_targets") or {}) if isinstance(cfg, dict) else {})
     cfg_notify = (((cfg.get("operations") or {}).get("notify") or {}) if isinstance(cfg, dict) else {})
@@ -157,6 +166,36 @@ def main():
         "regime_vol_window": int(approved_params.get("regime_vol_window", cfg_regime_filter.get("vol_window", 20))),
         "regime_high_vol_threshold": float(approved_params.get("regime_high_vol_threshold", cfg_regime_filter.get("high_vol_threshold", 0.02))),
         "regime_defensive_exposure": float(approved_params.get("regime_defensive_exposure", cfg_regime_filter.get("defensive_exposure", 0.30))),
+        "score_mom_short": int(approved_params.get("score_mom_short", cfg_strategy_score.get("mom_short", 20))),
+        "score_mom_long": int(approved_params.get("score_mom_long", cfg_strategy_score.get("mom_long", 60))),
+        "score_vol_window": int(approved_params.get("score_vol_window", cfg_strategy_score.get("vol_window", 20))),
+        "score_dd_window": int(approved_params.get("score_dd_window", cfg_strategy_score.get("dd_window", 60))),
+        "score_w_mom_short": float(approved_params.get("score_w_mom_short", cfg_strategy_score.get("w_mom_short", 0.50))),
+        "score_w_mom_long": float(approved_params.get("score_w_mom_long", cfg_strategy_score.get("w_mom_long", 0.30))),
+        "score_w_low_vol": float(approved_params.get("score_w_low_vol", cfg_strategy_score.get("w_low_vol", 0.10))),
+        "score_w_low_drawdown": float(approved_params.get("score_w_low_drawdown", cfg_strategy_score.get("w_low_drawdown", 0.10))),
+        "timing_switch_enabled": bool(approved_params.get("timing_switch_enabled", cfg_timing_switch.get("enabled", True))),
+        "trend_short_ma": int(approved_params.get("trend_short_ma", cfg_timing_switch.get("short_ma", 20))),
+        "trend_long_ma": int(approved_params.get("trend_long_ma", cfg_timing_switch.get("long_ma", 120))),
+        "trend_gate_threshold": float(approved_params.get("trend_gate_threshold", cfg_timing_switch.get("gate_threshold", 0.0))),
+        "trend_amplify_threshold": float(approved_params.get("trend_amplify_threshold", cfg_timing_switch.get("amplify_threshold", 0.02))),
+        "trend_amplify_mult": float(approved_params.get("trend_amplify_mult", cfg_timing_switch.get("amplify_mult", 1.20))),
+        "trend_defensive_scale": float(approved_params.get("trend_defensive_scale", cfg_timing_switch.get("defensive_scale", 0.50))),
+        "adaptive_top_n_enabled": bool(approved_params.get("adaptive_top_n_enabled", cfg_adaptive_top_n.get("enabled", True))),
+        "top_n_strong": int(approved_params.get("top_n_strong", cfg_adaptive_top_n.get("top_n_strong", 1))),
+        "top_n_neutral": int(approved_params.get("top_n_neutral", cfg_adaptive_top_n.get("top_n_neutral", 2))),
+        "top_n_weak": int(approved_params.get("top_n_weak", cfg_adaptive_top_n.get("top_n_weak", 4))),
+        "trend_strong_threshold": float(approved_params.get("trend_strong_threshold", cfg_adaptive_top_n.get("trend_strong_threshold", 0.03))),
+        "trend_weak_threshold": float(approved_params.get("trend_weak_threshold", cfg_adaptive_top_n.get("trend_weak_threshold", 0.0))),
+        "buy_threshold": float(approved_params.get("buy_threshold", cfg_anti_whipsaw.get("buy_threshold", -0.05))),
+        "sell_threshold": float(approved_params.get("sell_threshold", cfg_anti_whipsaw.get("sell_threshold", -0.12))),
+        "entry_confirm_periods": int(approved_params.get("entry_confirm_periods", cfg_anti_whipsaw.get("entry_confirm_periods", 2))),
+        "min_hold_rebalance_periods": int(approved_params.get("min_hold_rebalance_periods", cfg_anti_whipsaw.get("min_hold_rebalance_periods", 2))),
+        "reentry_cooldown_periods": int(approved_params.get("reentry_cooldown_periods", cfg_anti_whipsaw.get("reentry_cooldown_periods", 1))),
+        "ai_referee_enabled": bool(approved_params.get("ai_referee_enabled", cfg_ai_referee.get("enabled", True))),
+        "ai_referee_exposure_cap": float(approved_params.get("ai_referee_exposure_cap", cfg_ai_referee.get("exposure_cap", 0.15))),
+        "ai_referee_max_points": int(approved_params.get("ai_referee_max_points", cfg_ai_referee.get("max_llm_points", 60))),
+        "ai_referee_apply_if_better": bool(approved_params.get("ai_referee_apply_if_better", cfg_ai_referee.get("apply_if_better", True))),
     }
 
     quality_df = audit_universe(
@@ -171,7 +210,7 @@ def main():
     )
     quality_csv_path, quality_md_path = save_quality_reports(quality_df, prefix="paper_rotation")
 
-    result = run_from_local_cache(
+    baseline_result = run_from_local_cache(
         codes=codes,
         source="baostock",
         rebalance="W-FRI",
@@ -199,7 +238,135 @@ def main():
         regime_vol_window=exec_params["regime_vol_window"],
         regime_high_vol_threshold=exec_params["regime_high_vol_threshold"],
         regime_defensive_exposure=exec_params["regime_defensive_exposure"],
+        score_mom_short=exec_params["score_mom_short"],
+        score_mom_long=exec_params["score_mom_long"],
+        score_vol_window=exec_params["score_vol_window"],
+        score_dd_window=exec_params["score_dd_window"],
+        score_w_mom_short=exec_params["score_w_mom_short"],
+        score_w_mom_long=exec_params["score_w_mom_long"],
+        score_w_low_vol=exec_params["score_w_low_vol"],
+        score_w_low_drawdown=exec_params["score_w_low_drawdown"],
+        timing_switch_enabled=exec_params["timing_switch_enabled"],
+        trend_short_ma=exec_params["trend_short_ma"],
+        trend_long_ma=exec_params["trend_long_ma"],
+        trend_gate_threshold=exec_params["trend_gate_threshold"],
+        trend_amplify_threshold=exec_params["trend_amplify_threshold"],
+        trend_amplify_mult=exec_params["trend_amplify_mult"],
+        trend_defensive_scale=exec_params["trend_defensive_scale"],
+        adaptive_top_n_enabled=exec_params["adaptive_top_n_enabled"],
+        top_n_strong=exec_params["top_n_strong"],
+        top_n_neutral=exec_params["top_n_neutral"],
+        top_n_weak=exec_params["top_n_weak"],
+        trend_strong_threshold=exec_params["trend_strong_threshold"],
+        trend_weak_threshold=exec_params["trend_weak_threshold"],
+        buy_threshold=exec_params["buy_threshold"],
+        sell_threshold=exec_params["sell_threshold"],
+        entry_confirm_periods=exec_params["entry_confirm_periods"],
+        min_hold_rebalance_periods=exec_params["min_hold_rebalance_periods"],
+        reentry_cooldown_periods=exec_params["reentry_cooldown_periods"],
     )
+
+    ai_referee_csv_path = None
+    ai_referee_md_path = None
+    ab_csv_path = None
+    ab_json_path = None
+    ab_md_path = None
+    ab_decision = "BASELINE_KEEP"
+    ai_result = None
+
+    if exec_params["ai_referee_enabled"]:
+        try:
+            llm_cfg = (cfg.get("llm") or {}) if isinstance(cfg, dict) else {}
+            if llm_cfg.get("base_url"):
+                os.environ["LLM_BASE_URL"] = str(llm_cfg.get("base_url"))
+            if llm_cfg.get("api_key"):
+                os.environ["LLM_API_KEY"] = str(llm_cfg.get("api_key"))
+            if llm_cfg.get("model"):
+                os.environ["LLM_MODEL"] = str(llm_cfg.get("model"))
+
+            bench_close = load_close_matrix(codes=[benchmark_code], source="baostock")[benchmark_code]
+            ai_ref_df, ai_ref_sent = build_ai_referee_signals(
+                benchmark_close=bench_close,
+                rebalance="W-FRI",
+                llm_enabled=True,
+                max_llm_points=exec_params["ai_referee_max_points"],
+            )
+            ai_referee_csv_path, ai_referee_md_path = save_ai_referee_outputs(ai_ref_df, prefix="paper_rotation")
+
+            sent_series = ai_ref_sent.reindex(baseline_result.daily_returns.index).ffill().fillna(0.0)
+            ai_result = run_from_local_cache(
+                codes=codes,
+                source="baostock",
+                rebalance="W-FRI",
+                top_n=exec_params["top_n"],
+                fee_bps=exec_params["fee_bps"],
+                slippage_bps=exec_params["slippage_bps"],
+                min_score=exec_params["min_score"],
+                sentiment=sent_series,
+                benchmark_code=benchmark_code,
+                max_turnover=exec_params["max_turnover"],
+                use_risk_parity=True,
+                vol_lookback=exec_params["vol_lookback"],
+                target_vol_ann=exec_params["target_vol_ann"],
+                vol_target_lookback=20,
+                max_leverage=1.0,
+                drawdown_stop=exec_params["drawdown_stop"],
+                dd_cooldown_days=exec_params["dd_cooldown_days"],
+                impact_bps=exec_params["impact_bps"],
+                impact_power=exec_params["impact_power"],
+                impact_bps_cap_mult=exec_params["impact_bps_cap_mult"],
+                daily_loss_stop=exec_params["daily_loss_stop"],
+                monthly_drawdown_stop=exec_params["monthly_drawdown_stop"],
+                stop_cooldown_days=exec_params["stop_cooldown_days"],
+                regime_filter_enabled=exec_params["regime_filter_enabled"],
+                regime_ma_window=exec_params["regime_ma_window"],
+                regime_vol_window=exec_params["regime_vol_window"],
+                regime_high_vol_threshold=exec_params["regime_high_vol_threshold"],
+                regime_defensive_exposure=exec_params["regime_defensive_exposure"],
+                score_mom_short=exec_params["score_mom_short"],
+                score_mom_long=exec_params["score_mom_long"],
+                score_vol_window=exec_params["score_vol_window"],
+                score_dd_window=exec_params["score_dd_window"],
+                score_w_mom_short=exec_params["score_w_mom_short"],
+                score_w_mom_long=exec_params["score_w_mom_long"],
+                score_w_low_vol=exec_params["score_w_low_vol"],
+                score_w_low_drawdown=exec_params["score_w_low_drawdown"],
+                buy_threshold=exec_params["buy_threshold"],
+                sell_threshold=exec_params["sell_threshold"],
+                sentiment_exposure_cap=exec_params["ai_referee_exposure_cap"],
+                entry_confirm_periods=exec_params["entry_confirm_periods"],
+                min_hold_rebalance_periods=exec_params["min_hold_rebalance_periods"],
+                reentry_cooldown_periods=exec_params["reentry_cooldown_periods"],
+                timing_switch_enabled=exec_params["timing_switch_enabled"],
+                trend_short_ma=exec_params["trend_short_ma"],
+                trend_long_ma=exec_params["trend_long_ma"],
+                trend_gate_threshold=exec_params["trend_gate_threshold"],
+                trend_amplify_threshold=exec_params["trend_amplify_threshold"],
+                trend_amplify_mult=exec_params["trend_amplify_mult"],
+                trend_defensive_scale=exec_params["trend_defensive_scale"],
+                adaptive_top_n_enabled=exec_params["adaptive_top_n_enabled"],
+                top_n_strong=exec_params["top_n_strong"],
+                top_n_neutral=exec_params["top_n_neutral"],
+                top_n_weak=exec_params["top_n_weak"],
+                trend_strong_threshold=exec_params["trend_strong_threshold"],
+                trend_weak_threshold=exec_params["trend_weak_threshold"],
+            )
+            ab_csv_path, ab_json_path, ab_md_path = save_ab_compare(
+                baseline_metrics=baseline_result.metrics,
+                ai_metrics=ai_result.metrics,
+                prefix="paper_rotation",
+            )
+            try:
+                ab_payload = json.loads((ab_json_path).read_text(encoding="utf-8"))
+                ab_decision = str(ab_payload.get("decision", "BASELINE_KEEP"))
+            except Exception:
+                ab_decision = "BASELINE_KEEP"
+        except Exception as e:
+            print(f"[warn] AI裁判层失败，回退baseline: {e}")
+
+    result = baseline_result
+    if ai_result is not None and exec_params["ai_referee_apply_if_better"] and ab_decision == "AI_REFEREE_ON":
+        result = ai_result
 
     risk_limits = RiskLimits(
         max_daily_drawdown=float(approved_params.get("max_daily_drawdown", cfg_risk_limits.get("max_daily_drawdown", -0.05))),
@@ -396,6 +563,11 @@ def main():
         f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
         f"- 停盘阈值: daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
         f"- 市场状态过滤: enabled={exec_params['regime_filter_enabled']}, ma={exec_params['regime_ma_window']}, vol_window={exec_params['regime_vol_window']}, vol_th={exec_params['regime_high_vol_threshold']}, def_exp={exec_params['regime_defensive_exposure']}\n"
+        f"- 选股打分参数: mom=({exec_params['score_mom_short']},{exec_params['score_mom_long']}), vol_win={exec_params['score_vol_window']}, dd_win={exec_params['score_dd_window']}, w=({exec_params['score_w_mom_short']},{exec_params['score_w_mom_long']},{exec_params['score_w_low_vol']},{exec_params['score_w_low_drawdown']})\n"
+        f"- 择时开关: enabled={exec_params['timing_switch_enabled']}, ma=({exec_params['trend_short_ma']},{exec_params['trend_long_ma']}), gate={exec_params['trend_gate_threshold']}, amp_th={exec_params['trend_amplify_threshold']}, amp_mult={exec_params['trend_amplify_mult']}, def_scale={exec_params['trend_defensive_scale']}\n"
+        f"- 自适应TopN: enabled={exec_params['adaptive_top_n_enabled']}, strong/neutral/weak=({exec_params['top_n_strong']},{exec_params['top_n_neutral']},{exec_params['top_n_weak']}), trend_th=({exec_params['trend_weak_threshold']},{exec_params['trend_strong_threshold']})\n"
+        f"- 反复打脸抑制: buy_th={exec_params['buy_threshold']}, sell_th={exec_params['sell_threshold']}, entry_confirm={exec_params['entry_confirm_periods']}, min_hold={exec_params['min_hold_rebalance_periods']}, reentry_cooldown={exec_params['reentry_cooldown_periods']}\n"
+        f"- AI裁判层: enabled={exec_params['ai_referee_enabled']}, exposure_cap={exec_params['ai_referee_exposure_cap']}, max_points={exec_params['ai_referee_max_points']}, apply_if_better={exec_params['ai_referee_apply_if_better']}, ab_decision={ab_decision}\n"
         f"- 回测总成本: {result.metrics.get('cost_total', 0.0):.4f}（冲击成本 {result.metrics.get('cost_impact', 0.0):.4f}）\n"
         f"- 停盘触发次数: daily={int(result.metrics.get('stop_trigger_daily', 0))}, monthly={int(result.metrics.get('stop_trigger_monthly', 0))}, total_dd={int(result.metrics.get('stop_trigger_total_dd', 0))}\n"
         f"- 模拟目标评估: fail_items={target_fail_items}, detail={target_eval}\n"
@@ -416,6 +588,11 @@ def main():
         f"- 风控失败项: {risk_review.get('fail_items', [])}\n"
         f"- AI研究报告JSON: {ai_json_path}\n"
         f"- AI研究报告MD: {ai_md_path}\n"
+        f"- AI裁判CSV: {ai_referee_csv_path}\n"
+        f"- AI裁判MD: {ai_referee_md_path}\n"
+        f"- A/B对比CSV: {ab_csv_path}\n"
+        f"- A/B对比JSON: {ab_json_path}\n"
+        f"- A/B对比MD: {ab_md_path}\n"
         f"- 市场阶段复盘CSV: {regime_csv_path}\n"
         f"- 市场阶段复盘MD: {regime_md_path}\n"
         f"- 市场阶段关键洞察: {regime_insight}\n"
