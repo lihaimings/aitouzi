@@ -174,6 +174,7 @@
 - 双体系手册：`docs/two-layer-architecture-and-playbook.md`
 - 自动化与审批：`docs/automation-schedule.md`
 - 免费数据稳定性：`docs/free-data-stack-and-stability.md`
+- 免费数据源调研实测：`docs/free-data-source-research-2026.md`
 - 当前已落地：
   - 基准对比（benchmark alpha）
   - 风险平价权重（inverse-vol）

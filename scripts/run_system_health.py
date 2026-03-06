@@ -76,10 +76,13 @@ def main() -> int:
     total = int(len(fetch_status)) if not fetch_status.empty else 0
     counts = fetch_status["status"].value_counts().to_dict() if (not fetch_status.empty and "status" in fetch_status.columns) else {}
     ok = int(counts.get("ok", 0))
+    short = int(counts.get("short", 0))
     stale = int(counts.get("stale", 0))
     failed = int(counts.get("failed", 0))
+    pending_retry = int(counts.get("待补全", 0))
     queued = int(counts.get("queued", 0))
-    success_ratio = float(ok / total) if total > 0 else 0.0
+    success_ratio = float((ok + short) / total) if total > 0 else 0.0
+    failed_ratio = float((failed + pending_retry) / total) if total > 0 else 0.0
 
     avg_duration = 0.0
     p95_duration = 0.0
@@ -99,7 +102,7 @@ def main() -> int:
     preflight_status = str(preflight.get("status", "UNKNOWN"))
 
     health_status = "GREEN"
-    if preflight_status == "FAIL" or failed > 0:
+    if preflight_status == "FAIL" or failed_ratio > 0.05:
         health_status = "RED"
     elif preflight_status == "WARN" or stale > 0 or queued > 0:
         health_status = "YELLOW"
@@ -110,8 +113,11 @@ def main() -> int:
         "fetch": {
             "total": total,
             "ok": ok,
+            "short": short,
             "stale": stale,
             "failed": failed,
+            "pending_retry": pending_retry,
+            "failed_ratio": round(failed_ratio, 4),
             "queued": queued,
             "success_ratio": round(success_ratio, 4),
         },
@@ -141,12 +147,18 @@ def main() -> int:
         "# System Health\n\n"
         f"- status: **{health_status}**\n"
         f"- preflight: {preflight_status}\n"
-        f"- fetch: total={total}, ok={ok}, stale={stale}, failed={failed}, queued={queued}, success_ratio={success_ratio:.2%}\n"
+        f"- fetch: total={total}, ok={ok}, short={short}, stale={stale}, failed={failed}, pending_retry={pending_retry}, queued={queued}, success_ratio={success_ratio:.2%}\n"
         f"- 30d: runs={run_30d}, failed_total={error_30d}, avg_duration={avg_duration:.1f}s, p95_duration={p95_duration:.1f}s\n"
     )
     md_path.write_text(md, encoding="utf-8")
 
-    summary = f"SystemHealth={health_status} | preflight={preflight_status} | ok={ok}/{total} | failed={failed} | queued={queued}"
+    zh = {"GREEN": "绿色", "YELLOW": "黄色", "RED": "红色"}
+    pre_zh = {"PASS": "通过", "WARN": "警告", "FAIL": "未通过"}
+    summary = (
+        f"系统健康={zh.get(health_status, health_status)} | "
+        f"模拟前检查={pre_zh.get(preflight_status, preflight_status)} | "
+        f"成功+短历史={ok+short}/{total} | 失败={failed} | 待补全={pending_retry} | 排队待补抓={queued}"
+    )
     print(summary)
 
     should_push = False
@@ -163,10 +175,9 @@ def main() -> int:
     _save_state(state)
 
     if should_push:
-        zh = {"GREEN": "绿色", "YELLOW": "黄色", "RED": "红色"}
         alert_text = (
             f"系统健康告警: 连续{red_streak}天{zh.get(health_status, health_status)}，建议暂停观察\n"
-            f"preflight={preflight_status}, 抓数: ok={ok}/{total}, failed={failed}, queued={queued}"
+            f"模拟前检查={pre_zh.get(preflight_status, preflight_status)}, 抓数: 成功+短历史={ok+short}/{total}, 失败={failed}, 待补全={pending_retry}, 排队待补抓={queued}"
         )
         try:
             push_dm(alert_text)

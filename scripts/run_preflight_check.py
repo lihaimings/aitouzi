@@ -43,17 +43,18 @@ def _evaluate_fetch_status(df: pd.DataFrame) -> dict:
     total = max(1, len(df))
     counts = df["status"].value_counts().to_dict()
     fail_ratio = float(counts.get("failed", 0) / total)
+    pending_ratio = float(counts.get("待补全", 0) / total)
     stale_ratio = float(counts.get("stale", 0) / total)
     queued_ratio = float(counts.get("queued", 0) / total)
 
     status = "PASS"
     reason = ""
-    if fail_ratio > 0.20:
+    if fail_ratio > 0.20 or pending_ratio > 0.20:
         status = "FAIL"
-        reason = "fetch_failed_ratio_too_high"
-    elif stale_ratio > 0.70 or queued_ratio > 0.80:
+        reason = "fetch_failed_or_pending_ratio_too_high"
+    elif stale_ratio > 0.70 or queued_ratio > 0.80 or pending_ratio > 0.05:
         status = "WARN"
-        reason = "fetch_stale_or_queued_high"
+        reason = "fetch_stale_or_queued_or_pending_high"
 
     return {
         "status": status,
@@ -62,6 +63,7 @@ def _evaluate_fetch_status(df: pd.DataFrame) -> dict:
             "total": int(total),
             "counts": counts,
             "fail_ratio": round(fail_ratio, 4),
+            "pending_ratio": round(pending_ratio, 4),
             "stale_ratio": round(stale_ratio, 4),
             "queued_ratio": round(queued_ratio, 4),
         },
@@ -157,6 +159,11 @@ def _merge_status(parts: list[dict]) -> str:
     return "PASS"
 
 
+def _zh_status(status: str) -> str:
+    mapping = {"PASS": "通过", "WARN": "警告", "FAIL": "未通过"}
+    return mapping.get(str(status).upper(), str(status))
+
+
 def _render_markdown(final_status: str, parts: dict) -> str:
     lines = [
         "# 模拟前检查（Preflight）\n",
@@ -211,8 +218,8 @@ def main() -> int:
 
     detail = parts.get("fetch_status", {}).get("stats", {})
     text = (
-        f"Preflight={final_status} | fetch_total={detail.get('total', 0)} | "
-        f"failed={detail.get('counts', {}).get('failed', 0)} | queued={detail.get('counts', {}).get('queued', 0)}"
+        f"模拟前检查={_zh_status(final_status)} | 抓数总数={detail.get('total', 0)} | "
+        f"失败={detail.get('counts', {}).get('failed', 0)} | 排队待补抓={detail.get('counts', {}).get('queued', 0)}"
     )
     print(text)
 

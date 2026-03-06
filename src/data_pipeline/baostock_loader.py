@@ -1,10 +1,12 @@
 import baostock as bs
 import pandas as pd
+import atexit
 from pathlib import Path
 from typing import Optional
 
 DATA_DIR = Path(__file__).resolve().parents[2] / 'data'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+_LOGGED_IN = False
 
 ETF_LIST = [
     '510300',  # sh
@@ -25,37 +27,68 @@ def code_with_exchange(code: str) -> str:
         return f"sh.{code}"
 
 
-def fetch_k_daily(code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+def _ensure_login() -> None:
+    global _LOGGED_IN
+    if _LOGGED_IN:
+        return
     lg = bs.login()
-    try:
-        if lg.error_code != '0':
-            raise RuntimeError(f"baostock login failed: {lg.error_msg}")
-        query_kwargs = {
-            "code": code_with_exchange(code),
-            "fields": 'date,open,high,low,close,volume,amount',
-            "frequency": 'd',
-            "adjustflag": '3',
-        }
-        if start_date:
-            query_kwargs["start_date"] = start_date
-        if end_date:
-            query_kwargs["end_date"] = end_date
+    if lg.error_code != '0':
+        raise RuntimeError(f"baostock login failed: {lg.error_msg}")
+    _LOGGED_IN = True
 
-        rs = bs.query_history_k_data_plus(**query_kwargs)
-        if rs.error_code != '0':
-            raise RuntimeError(f"baostock query failed: {rs.error_msg}")
-        data_list = []
-        while rs.next():
-            data_list.append(rs.get_row_data())
-        df = pd.DataFrame(data_list, columns=rs.fields)
-        df['date'] = pd.to_datetime(df['date'])
-        numeric_cols = ['open','high','low','close','volume','amount']
-        for c in numeric_cols:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        df = df.dropna(subset=['date', 'close']).sort_values('date').reset_index(drop=True)
-        return df
-    finally:
+
+def _safe_logout() -> None:
+    global _LOGGED_IN
+    if not _LOGGED_IN:
+        return
+    try:
         bs.logout()
+    finally:
+        _LOGGED_IN = False
+
+
+atexit.register(_safe_logout)
+
+
+def _query(symbol: str, start_date: Optional[str], end_date: Optional[str]):
+    query_kwargs = {
+        "code": symbol,
+        "fields": 'date,open,high,low,close,volume,amount',
+        "frequency": 'd',
+        "adjustflag": '3',
+    }
+    if start_date:
+        query_kwargs["start_date"] = start_date
+    if end_date:
+        query_kwargs["end_date"] = end_date
+    rs = bs.query_history_k_data_plus(**query_kwargs)
+    if rs.error_code != '0':
+        raise RuntimeError(f"baostock query failed: {rs.error_msg}")
+    data_list = []
+    while rs.next():
+        data_list.append(rs.get_row_data())
+    return pd.DataFrame(data_list, columns=rs.fields)
+
+
+def fetch_k_daily(code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+    _ensure_login()
+    code = str(code).strip()
+    primary = code_with_exchange(code)
+    df = _query(primary, start_date=start_date, end_date=end_date)
+
+    if df.empty:
+        alt = f"sz.{code}" if primary.startswith("sh.") else f"sh.{code}"
+        df = _query(alt, start_date=start_date, end_date=end_date)
+
+    if df.empty:
+        return df
+
+    df['date'] = pd.to_datetime(df['date'])
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount']
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    df = df.dropna(subset=['date', 'close']).sort_values('date').reset_index(drop=True)
+    return df
 
 
 def cache_daily(code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Path:

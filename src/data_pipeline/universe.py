@@ -13,6 +13,19 @@ REPORT_DIR = Path(__file__).resolve().parents[2] / "reports"
 UNIVERSE_CSV = DATA_DIR / "etf_universe.csv"
 UNIVERSE_JSON = REPORT_DIR / "paper_rotation_universe_summary.json"
 BENCHMARK_CODES = ["510300", "510500", "159915"]
+VALID_PREFIXES = (
+    "159",
+    "510",
+    "511",
+    "512",
+    "513",
+    "515",
+    "516",
+    "517",
+    "518",
+    "56",
+    "58",
+)
 
 
 def _normalize_code(value: str) -> str:
@@ -23,7 +36,11 @@ def _normalize_code(value: str) -> str:
         s = s.split(".")[-1]
     if s.startswith(("sh", "sz", "SH", "SZ")) and len(s) >= 8:
         s = s[-6:]
-    return s if (len(s) == 6 and s.isdigit()) else ""
+    if not (len(s) == 6 and s.isdigit()):
+        return ""
+    if not s.startswith(VALID_PREFIXES):
+        return ""
+    return s
 
 
 def _fetch_sina_etf_table() -> pd.DataFrame:
