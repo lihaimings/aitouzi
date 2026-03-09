@@ -67,6 +67,7 @@ def main():
         "ai_referee_exposure_cap": 0.15,
         "ai_referee_max_points": 60,
         "ai_referee_apply_if_better": True,
+        "init_cash": 10000.0,
         "max_daily_drawdown": -0.05,
         "max_total_drawdown": -0.15,
         "max_position_weight": 0.60,

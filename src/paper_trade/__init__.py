@@ -13,6 +13,7 @@ class FillRecord:
     symbol: str
     action: str
     weight_change: float
+    trade_notional: float
     fee_cost: float
     slippage_cost: float
     impact_cost: float
@@ -21,6 +22,7 @@ class FillRecord:
 
 def simulate_paper_trades(
     weights: pd.DataFrame,
+    init_cash: float = 10000.0,
     fee_bps: float = 5.0,
     slippage_bps: float = 5.0,
     amount_df: pd.DataFrame | None = None,
@@ -56,13 +58,14 @@ def simulate_paper_trades(
                 continue
             action = "BUY" if delta > 0 else "SELL"
             delta_abs = abs(float(delta))
-            fee_cost = delta_abs * fee_rate
-            slippage_cost = delta_abs * slippage_rate
+            trade_notional = delta_abs * float(init_cash)
+            fee_cost = trade_notional * fee_rate
+            slippage_cost = trade_notional * slippage_rate
 
             if impact_rate_base > 0 and amount_sum > 0:
                 ratio = delta_abs / (float(liq_share.get(symbol, 0.0)) + 1e-8)
                 impact_rate = min((ratio ** impact_power) * impact_rate_base, impact_rate_cap)
-                impact_cost = delta_abs * impact_rate
+                impact_cost = trade_notional * impact_rate
             else:
                 impact_cost = 0.0
 
@@ -73,6 +76,7 @@ def simulate_paper_trades(
                     symbol=str(symbol),
                     action=action,
                     weight_change=float(delta),
+                    trade_notional=float(trade_notional),
                     fee_cost=float(fee_cost),
                     slippage_cost=float(slippage_cost),
                     impact_cost=float(impact_cost),
@@ -84,7 +88,7 @@ def simulate_paper_trades(
 
 def fills_to_frame(records: List[FillRecord]) -> pd.DataFrame:
     if not records:
-        return pd.DataFrame(columns=["date", "symbol", "action", "weight_change", "fee_cost", "slippage_cost", "impact_cost", "est_cost"])
+        return pd.DataFrame(columns=["date", "symbol", "action", "weight_change", "trade_notional", "fee_cost", "slippage_cost", "impact_cost", "est_cost"])
 
     rows = [
         {
@@ -92,6 +96,7 @@ def fills_to_frame(records: List[FillRecord]) -> pd.DataFrame:
             "symbol": r.symbol,
             "action": r.action,
             "weight_change": r.weight_change,
+            "trade_notional": r.trade_notional,
             "fee_cost": r.fee_cost,
             "slippage_cost": r.slippage_cost,
             "impact_cost": r.impact_cost,

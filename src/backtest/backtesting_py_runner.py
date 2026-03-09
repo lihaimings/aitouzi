@@ -44,6 +44,7 @@ def run_backtestingpy_sma(
     fast: int = 10,
     slow: int = 30,
     commission: float = 0.001,
+    cash: float = 10000.0,
 ) -> Dict[str, float]:
     """
     使用 backtesting.py 跑一个基准策略（SMA交叉）做对照，不替代主策略。
@@ -64,7 +65,7 @@ def run_backtestingpy_sma(
             elif self.ma_fast[-1] < self.ma_slow[-1] and self.ma_fast[-2] >= self.ma_slow[-2]:
                 self.sell()
 
-    bt = Backtest(data, SmaCross, cash=100000, commission=commission, exclusive_orders=True)
+    bt = Backtest(data, SmaCross, cash=cash, commission=commission, exclusive_orders=True)
     stats = bt.run()
 
     return {

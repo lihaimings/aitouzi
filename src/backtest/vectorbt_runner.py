@@ -655,6 +655,7 @@ def run_from_local_cache(
     top_n_weak: int = 4,
     trend_strong_threshold: float = 0.03,
     trend_weak_threshold: float = 0.0,
+    init_cash: float = 10000.0,
 ) -> BacktestResult:
     close = load_close_matrix(codes=codes, source=source)
     amount = load_amount_matrix(codes=codes, source=source).reindex(close.index).fillna(0.0)
@@ -673,6 +674,7 @@ def run_from_local_cache(
         slippage_bps=slippage_bps,
         min_score=min_score,
         sentiment=sentiment,
+        init_cash=init_cash,
         benchmark_returns=bench,
         max_turnover=max_turnover,
         use_risk_parity=use_risk_parity,

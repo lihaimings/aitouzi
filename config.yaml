@@ -16,6 +16,7 @@ llm:
     - research_automation
 trading:
   mode: paper
+  init_cash: 10000
   constraints:
     - T+1
     - limit_up_down

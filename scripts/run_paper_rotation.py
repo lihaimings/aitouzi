@@ -87,9 +87,9 @@ def _try_generate_quantstats(result):
         return None
 
 
-def _try_run_backtestingpy_baseline(code: str):
+def _try_run_backtestingpy_baseline(code: str, cash: float):
     try:
-        return run_backtestingpy_sma(code=code, source="baostock", fast=10, slow=30, commission=0.001)
+        return run_backtestingpy_sma(code=code, source="baostock", fast=10, slow=30, commission=0.001, cash=float(cash))
     except Exception as e:
         print(f"[warn] backtesting.py基准策略运行失败: {e}")
         return None
@@ -142,6 +142,7 @@ def main():
     cfg_notify = (((cfg.get("operations") or {}).get("notify") or {}) if isinstance(cfg, dict) else {})
     cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
     cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
+    cfg_trading = ((cfg.get("trading") or {}) if isinstance(cfg, dict) else {})
 
     approved_params, approved_path = _load_approved_params(prefix="paper_rotation")
 
@@ -196,6 +197,7 @@ def main():
         "ai_referee_exposure_cap": float(approved_params.get("ai_referee_exposure_cap", cfg_ai_referee.get("exposure_cap", 0.15))),
         "ai_referee_max_points": int(approved_params.get("ai_referee_max_points", cfg_ai_referee.get("max_llm_points", 60))),
         "ai_referee_apply_if_better": bool(approved_params.get("ai_referee_apply_if_better", cfg_ai_referee.get("apply_if_better", True))),
+        "init_cash": float(approved_params.get("init_cash", cfg_trading.get("init_cash", 10000.0))),
     }
 
     quality_df = audit_universe(
@@ -264,6 +266,7 @@ def main():
         entry_confirm_periods=exec_params["entry_confirm_periods"],
         min_hold_rebalance_periods=exec_params["min_hold_rebalance_periods"],
         reentry_cooldown_periods=exec_params["reentry_cooldown_periods"],
+        init_cash=exec_params["init_cash"],
     )
 
     ai_referee_csv_path = None
@@ -350,6 +353,7 @@ def main():
                 top_n_weak=exec_params["top_n_weak"],
                 trend_strong_threshold=exec_params["trend_strong_threshold"],
                 trend_weak_threshold=exec_params["trend_weak_threshold"],
+                init_cash=exec_params["init_cash"],
             )
             ab_csv_path, ab_json_path, ab_md_path = save_ab_compare(
                 baseline_metrics=baseline_result.metrics,
@@ -491,6 +495,7 @@ def main():
     amount_df = load_amount_matrix(codes=codes, source="baostock").reindex(result.weights.index).fillna(0.0)
     fills = simulate_paper_trades(
         result.weights,
+        init_cash=exec_params["init_cash"],
         fee_bps=exec_params["fee_bps"],
         slippage_bps=exec_params["slippage_bps"],
         amount_df=amount_df,
@@ -511,7 +516,7 @@ def main():
     report_path = save_report(report_text, filename="paper_rotation_daily.md")
 
     qs_path = _try_generate_quantstats(result)
-    baseline_stats = _try_run_backtestingpy_baseline(code=codes[0])
+    baseline_stats = _try_run_backtestingpy_baseline(code=codes[0], cash=exec_params["init_cash"])
 
     baseline_text = ""
     if baseline_stats is not None:
@@ -527,6 +532,8 @@ def main():
     best_benchmark = benchmark_df.iloc[0].to_dict() if not benchmark_df.empty else {}
     fill_cost_total = float(fills_df["est_cost"].sum()) if not fills_df.empty else 0.0
     fill_impact_total = float(fills_df["impact_cost"].sum()) if not fills_df.empty else 0.0
+    backtest_cost_cash = float(result.metrics.get("cost_total", 0.0)) * float(exec_params["init_cash"])
+    backtest_impact_cash = float(result.metrics.get("cost_impact", 0.0)) * float(exec_params["init_cash"])
 
     target_eval = {
         "annual_return": {
@@ -559,6 +566,7 @@ def main():
         f"- 净值文件: {eq_path}\n"
         f"- 权重文件: {wt_path}\n"
         f"- 成交文件: {fills_path}\n"
+        f"- 模拟总资金: {exec_params['init_cash']:.2f}\n"
         f"- 风险预算缩放: {exposure_path}\n"
         f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
         f"- 停盘阈值: daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
@@ -568,10 +576,10 @@ def main():
         f"- 自适应TopN: enabled={exec_params['adaptive_top_n_enabled']}, strong/neutral/weak=({exec_params['top_n_strong']},{exec_params['top_n_neutral']},{exec_params['top_n_weak']}), trend_th=({exec_params['trend_weak_threshold']},{exec_params['trend_strong_threshold']})\n"
         f"- 反复打脸抑制: buy_th={exec_params['buy_threshold']}, sell_th={exec_params['sell_threshold']}, entry_confirm={exec_params['entry_confirm_periods']}, min_hold={exec_params['min_hold_rebalance_periods']}, reentry_cooldown={exec_params['reentry_cooldown_periods']}\n"
         f"- AI裁判层: enabled={exec_params['ai_referee_enabled']}, exposure_cap={exec_params['ai_referee_exposure_cap']}, max_points={exec_params['ai_referee_max_points']}, apply_if_better={exec_params['ai_referee_apply_if_better']}, ab_decision={ab_decision}\n"
-        f"- 回测总成本: {result.metrics.get('cost_total', 0.0):.4f}（冲击成本 {result.metrics.get('cost_impact', 0.0):.4f}）\n"
+        f"- 回测总成本: 比例={result.metrics.get('cost_total', 0.0):.4f}，金额≈{backtest_cost_cash:.2f}（冲击成本≈{backtest_impact_cash:.2f}）\n"
         f"- 停盘触发次数: daily={int(result.metrics.get('stop_trigger_daily', 0))}, monthly={int(result.metrics.get('stop_trigger_monthly', 0))}, total_dd={int(result.metrics.get('stop_trigger_total_dd', 0))}\n"
         f"- 模拟目标评估: fail_items={target_fail_items}, detail={target_eval}\n"
-        f"- 模拟成交总成本: {fill_cost_total:.4f}（冲击成本 {fill_impact_total:.4f}）\n"
+        f"- 模拟成交总成本: {fill_cost_total:.2f}（冲击成本 {fill_impact_total:.2f}）\n"
         f"- 报告文件: {report_path}\n"
         f"- WalkForward窗口表: {wf_table_path}\n"
         f"- WalkForward净值: {wf_equity_path}\n"
