@@ -198,6 +198,7 @@ def main():
         "ai_referee_max_points": int(approved_params.get("ai_referee_max_points", cfg_ai_referee.get("max_llm_points", 60))),
         "ai_referee_apply_if_better": bool(approved_params.get("ai_referee_apply_if_better", cfg_ai_referee.get("apply_if_better", True))),
         "init_cash": float(approved_params.get("init_cash", cfg_trading.get("init_cash", 10000.0))),
+        "execution_time": str(approved_params.get("execution_time", cfg_trading.get("execution_time", "14:50"))),
     }
 
     quality_df = audit_universe(
@@ -496,6 +497,7 @@ def main():
     fills = simulate_paper_trades(
         result.weights,
         init_cash=exec_params["init_cash"],
+        execution_time=exec_params["execution_time"],
         fee_bps=exec_params["fee_bps"],
         slippage_bps=exec_params["slippage_bps"],
         amount_df=amount_df,
@@ -567,6 +569,7 @@ def main():
         f"- 权重文件: {wt_path}\n"
         f"- 成交文件: {fills_path}\n"
         f"- 模拟总资金: {exec_params['init_cash']:.2f}\n"
+        f"- 模拟执行时间: {exec_params['execution_time']}（仅交易时段）\n"
         f"- 风险预算缩放: {exposure_path}\n"
         f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
         f"- 停盘阈值: daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
@@ -630,7 +633,12 @@ def main():
 
     trade_buys = []
     trade_sells = []
-    if len(result.weights) >= 2:
+    latest_trade_date = pd.Timestamp(result.weights.index.max()).normalize() if len(result.weights) > 0 else None
+    today = pd.Timestamp.today().normalize()
+    is_trading_day_today = bool(today.weekday() < 5)
+    is_today_rebalanced = bool(latest_trade_date is not None and latest_trade_date == today and is_trading_day_today)
+
+    if len(result.weights) >= 2 and is_today_rebalanced:
         cur_w = pd.to_numeric(result.weights.iloc[-1], errors="coerce").fillna(0.0)
         prev_w = pd.to_numeric(result.weights.iloc[-2], errors="coerce").fillna(0.0)
         delta_w = (cur_w - prev_w).sort_values(ascending=False)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import time
 from typing import List
 
 
@@ -10,6 +11,7 @@ import pandas as pd
 @dataclass
 class FillRecord:
     date: pd.Timestamp
+    executed_at: pd.Timestamp
     symbol: str
     action: str
     weight_change: float
@@ -23,6 +25,7 @@ class FillRecord:
 def simulate_paper_trades(
     weights: pd.DataFrame,
     init_cash: float = 10000.0,
+    execution_time: str = "14:50",
     fee_bps: float = 5.0,
     slippage_bps: float = 5.0,
     amount_df: pd.DataFrame | None = None,
@@ -37,6 +40,17 @@ def simulate_paper_trades(
     records: List[FillRecord] = []
     diff = weights.diff().fillna(weights)
 
+    try:
+        hh, mm = [int(x) for x in str(execution_time).split(":", 1)]
+        exec_t = time(hour=hh, minute=mm)
+    except Exception:
+        raise ValueError(f"invalid execution_time: {execution_time}")
+
+    in_morning = (time(9, 30) <= exec_t <= time(11, 30))
+    in_afternoon = (time(13, 0) <= exec_t <= time(15, 0))
+    if not (in_morning or in_afternoon):
+        raise ValueError(f"execution_time out of A-share session: {execution_time}")
+
     fee_rate = fee_bps / 10000.0
     slippage_rate = slippage_bps / 10000.0
     impact_rate_base = max(0.0, impact_bps) / 10000.0
@@ -49,6 +63,11 @@ def simulate_paper_trades(
         amount_df = pd.DataFrame(index=weights.index, columns=weights.columns, data=0.0)
 
     for dt, row in diff.iterrows():
+        dt_ts = pd.Timestamp(dt)
+        if int(dt_ts.weekday()) >= 5:
+            continue
+
+        executed_at = pd.Timestamp.combine(dt_ts.date(), exec_t)
         amount_row = amount_df.loc[dt].reindex(diff.columns).fillna(0.0).astype(float)
         amount_sum = float(amount_row.sum())
         liq_share = (amount_row / amount_sum) if amount_sum > 0 else pd.Series(0.0, index=amount_row.index)
@@ -72,7 +91,8 @@ def simulate_paper_trades(
             est_cost = fee_cost + slippage_cost + impact_cost
             records.append(
                 FillRecord(
-                    date=pd.Timestamp(dt),
+                    date=dt_ts,
+                    executed_at=executed_at,
                     symbol=str(symbol),
                     action=action,
                     weight_change=float(delta),
@@ -88,11 +108,12 @@ def simulate_paper_trades(
 
 def fills_to_frame(records: List[FillRecord]) -> pd.DataFrame:
     if not records:
-        return pd.DataFrame(columns=["date", "symbol", "action", "weight_change", "trade_notional", "fee_cost", "slippage_cost", "impact_cost", "est_cost"])
+        return pd.DataFrame(columns=["date", "executed_at", "symbol", "action", "weight_change", "trade_notional", "fee_cost", "slippage_cost", "impact_cost", "est_cost"])
 
     rows = [
         {
             "date": r.date,
+            "executed_at": r.executed_at,
             "symbol": r.symbol,
             "action": r.action,
             "weight_change": r.weight_change,

@@ -17,6 +17,7 @@ llm:
 trading:
   mode: paper
   init_cash: 10000
+  execution_time: "14:50"
   constraints:
     - T+1
     - limit_up_down
