@@ -91,6 +91,13 @@ def _discover_codes(source: str = "baostock", min_rows: int = 240):
     return DEFAULT_CODES
 
 
+def _pick_benchmark(codes):
+    for c in ["510300", "159915", "510500"]:
+        if c in set(codes):
+            return c
+    return codes[0]
+
+
 def _try_generate_quantstats(result):
     try:
         return generate_quantstats_html(
@@ -139,9 +146,100 @@ def _load_config() -> dict:
         return {}
 
 
+def _build_window_snapshot(result, benchmark_code: str, source: str = "baostock") -> dict:
+    if result.equity.empty:
+        return {
+            "start": None,
+            "end": None,
+            "trading_days": 0,
+            "calendar_days": 0,
+            "regime_days": {},
+        }
+
+    start = pd.Timestamp(result.equity.index.min())
+    end = pd.Timestamp(result.equity.index.max())
+    trading_days = int(len(result.equity))
+    calendar_days = int((end - start).days) + 1
+
+    regime_days = {"bull": 0, "bear": 0, "sideways": 0}
+    try:
+        bench = load_close_matrix(codes=[benchmark_code], source=source)[benchmark_code].reindex(result.equity.index).ffill()
+        r20 = bench.pct_change(20)
+        for v in r20.fillna(0.0).tolist():
+            x = float(v)
+            if x >= 0.03:
+                regime_days["bull"] += 1
+            elif x <= -0.03:
+                regime_days["bear"] += 1
+            else:
+                regime_days["sideways"] += 1
+    except Exception:
+        regime_days = {"bull": 0, "bear": 0, "sideways": trading_days}
+
+    return {
+        "start": str(start.date()),
+        "end": str(end.date()),
+        "trading_days": trading_days,
+        "calendar_days": calendar_days,
+        "regime_days": regime_days,
+    }
+
+
+def _backtest_validity_score(window_snapshot: dict, wf_table: pd.DataFrame, quality_df: pd.DataFrame, cost_total: float) -> dict:
+    score = 0
+    checks = {}
+
+    td = int(window_snapshot.get("trading_days", 0))
+    if td >= 500:
+        score += 35
+        checks["window"] = "PASS"
+    elif td >= 250:
+        score += 22
+        checks["window"] = "WARN"
+    else:
+        score += 10
+        checks["window"] = "FAIL"
+
+    wf_n = int(len(wf_table)) if wf_table is not None else 0
+    if wf_n >= 8:
+        score += 25
+        checks["walk_forward"] = "PASS"
+    elif wf_n >= 4:
+        score += 15
+        checks["walk_forward"] = "WARN"
+    else:
+        score += 5
+        checks["walk_forward"] = "FAIL"
+
+    fail_n = int((quality_df["severity"] == "FAIL").sum()) if not quality_df.empty and "severity" in quality_df.columns else 0
+    if fail_n <= 3:
+        score += 20
+        checks["data_quality"] = "PASS"
+    elif fail_n <= 8:
+        score += 12
+        checks["data_quality"] = "WARN"
+    else:
+        score += 4
+        checks["data_quality"] = "FAIL"
+
+    if float(cost_total) > 0:
+        score += 20
+        checks["cost_model"] = "PASS"
+    else:
+        score += 0
+        checks["cost_model"] = "FAIL"
+
+    return {
+        "score": int(max(0, min(100, score))),
+        "checks": checks,
+        "wf_windows": wf_n,
+        "quality_fail_count": fail_n,
+    }
+
+
 def main():
     codes = _discover_codes(source="baostock")
-    benchmark_code = codes[0]
+    benchmark_code = _pick_benchmark(codes)
     cfg = _load_config()
 
     cfg_risk_limits = (((cfg.get("trading") or {}).get("risk_limits") or {}) if isinstance(cfg, dict) else {})
@@ -156,6 +254,7 @@ def main():
     cfg_quality = (((cfg.get("operations") or {}).get("quality_redline") or {}) if isinstance(cfg, dict) else {})
     cfg_targets = (((cfg.get("operations") or {}).get("simulation_targets") or {}) if isinstance(cfg, dict) else {})
     cfg_notify = (((cfg.get("operations") or {}).get("notify") or {}) if isinstance(cfg, dict) else {})
+    cfg_backtest = (((cfg.get("operations") or {}).get("backtest_validation") or {}) if isinstance(cfg, dict) else {})
     cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
     cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
     cfg_trading = ((cfg.get("trading") or {}) if isinstance(cfg, dict) else {})
@@ -215,6 +314,7 @@ def main():
         "ai_referee_apply_if_better": bool(approved_params.get("ai_referee_apply_if_better", cfg_ai_referee.get("apply_if_better", True))),
         "init_cash": float(approved_params.get("init_cash", cfg_trading.get("init_cash", 10000.0))),
         "execution_time": str(approved_params.get("execution_time", cfg_trading.get("execution_time", "14:50"))),
+        "max_trade_amount_ratio": float(approved_params.get("max_trade_amount_ratio", cfg_cost_model.get("max_trade_amount_ratio", 0.05))),
     }
 
     quality_df = audit_universe(
@@ -284,6 +384,7 @@ def main():
         min_hold_rebalance_periods=exec_params["min_hold_rebalance_periods"],
         reentry_cooldown_periods=exec_params["reentry_cooldown_periods"],
         init_cash=exec_params["init_cash"],
+        max_trade_amount_ratio=exec_params["max_trade_amount_ratio"],
     )
 
     ai_referee_csv_path = None
@@ -371,6 +472,7 @@ def main():
                 trend_strong_threshold=exec_params["trend_strong_threshold"],
                 trend_weak_threshold=exec_params["trend_weak_threshold"],
                 init_cash=exec_params["init_cash"],
+                max_trade_amount_ratio=exec_params["max_trade_amount_ratio"],
             )
             ab_csv_path, ab_json_path, ab_md_path = save_ab_compare(
                 baseline_metrics=baseline_result.metrics,
@@ -404,15 +506,19 @@ def main():
 
     eq_path, wt_path = save_backtest_outputs(result, prefix="paper_rotation")
 
+    wf_train_days = int(cfg_backtest.get("wf_train_days", 120))
+    wf_test_days = int(cfg_backtest.get("wf_test_days", 20))
+    wf_step_days = int(cfg_backtest.get("wf_step_days", 20))
+
     wf_table, wf_returns = run_walk_forward_from_local_cache(
         codes=codes,
         source="baostock",
         rebalance="W-FRI",
         fee_bps=exec_params["fee_bps"],
         slippage_bps=exec_params["slippage_bps"],
-        train_days=15,
-        test_days=8,
-        step_days=8,
+        train_days=wf_train_days,
+        test_days=wf_test_days,
+        step_days=wf_step_days,
         top_n_grid=[1, 2],
         min_score_grid=[-0.2, -0.1, 0.0],
     )
@@ -545,6 +651,13 @@ def main():
         qs_text = f"\n- QuantStats报告: {qs_path}"
 
     quality_counts = quality_df["severity"].value_counts().to_dict() if not quality_df.empty else {}
+    window_snapshot = _build_window_snapshot(result=result, benchmark_code=benchmark_code, source="baostock")
+    validity = _backtest_validity_score(
+        window_snapshot=window_snapshot,
+        wf_table=wf_table,
+        quality_df=quality_df,
+        cost_total=float(result.metrics.get("cost_total", 0.0)),
+    )
 
     best_stab = stability_df.iloc[0].to_dict() if not stability_df.empty else {}
     best_benchmark = benchmark_df.iloc[0].to_dict() if not benchmark_df.empty else {}
@@ -586,6 +699,7 @@ def main():
         f"- 成交文件: {fills_path}\n"
         f"- 模拟总资金: {exec_params['init_cash']:.2f}\n"
         f"- 模拟执行时间: {exec_params['execution_time']}（仅交易时段）\n"
+        f"- 单日成交额占比上限: {exec_params['max_trade_amount_ratio']:.2%}\n"
         f"- 风险预算缩放: {exposure_path}\n"
         f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
         f"- 停盘阈值: daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
@@ -599,6 +713,10 @@ def main():
         f"- 停盘触发次数: daily={int(result.metrics.get('stop_trigger_daily', 0))}, monthly={int(result.metrics.get('stop_trigger_monthly', 0))}, total_dd={int(result.metrics.get('stop_trigger_total_dd', 0))}\n"
         f"- 模拟目标评估: fail_items={target_fail_items}, detail={target_eval}\n"
         f"- 模拟成交总成本: {fill_cost_total:.2f}（冲击成本 {fill_impact_total:.2f}）\n"
+        f"- 回测区间: {window_snapshot.get('start')} ~ {window_snapshot.get('end')} | 交易日={window_snapshot.get('trading_days')} | 自然日={window_snapshot.get('calendar_days')}\n"
+        f"- 行情覆盖: {window_snapshot.get('regime_days')}\n"
+        f"- 回测有效性评分: {validity.get('score')}/100 | checks={validity.get('checks')}\n"
+        f"- WalkForward配置: train={wf_train_days}, test={wf_test_days}, step={wf_step_days}, windows={validity.get('wf_windows')}\n"
         f"- 报告文件: {report_path}\n"
         f"- WalkForward窗口表: {wf_table_path}\n"
         f"- WalkForward净值: {wf_equity_path}\n"

@@ -29,6 +29,7 @@ def main():
         "impact_bps": 2.0,
         "impact_power": 0.5,
         "impact_bps_cap_mult": 5.0,
+        "max_trade_amount_ratio": 0.05,
         "daily_loss_stop": -0.03,
         "monthly_drawdown_stop": -0.10,
         "stop_cooldown_days": 3,

@@ -63,7 +63,7 @@ def _load_etf_amount(code: str, source: str = "baostock") -> pd.Series:
 def load_close_matrix(codes: Iterable[str], source: str = "baostock") -> pd.DataFrame:
     prices = [_load_etf_close(c, source=source) for c in codes]
     mat = pd.concat(prices, axis=1).sort_index().dropna(how="all")
-    return mat.ffill().dropna(how="any")
+    return mat.ffill().dropna(how="all")
 
 
 def load_amount_matrix(codes: Iterable[str], source: str = "baostock") -> pd.DataFrame:
@@ -387,8 +387,9 @@ def run_rotation_backtest(
     top_n_weak: int = 4,
     trend_strong_threshold: float = 0.03,
     trend_weak_threshold: float = 0.0,
+    max_trade_amount_ratio: Optional[float] = None,
 ) -> BacktestResult:
-    close_df = close_df.sort_index().ffill().dropna(how="any")
+    close_df = close_df.sort_index().ffill().dropna(how="all")
     ret = close_df.pct_change().fillna(0.0)
 
     score = compute_rotation_score(
@@ -527,6 +528,15 @@ def run_rotation_backtest(
 
         exposure_scale.loc[dt] = scale
         eff_target = base_target * scale
+
+        amount_row = amount_df.loc[dt].reindex(base_target.index).fillna(0.0).astype(float)
+        if max_trade_amount_ratio is not None and max_trade_amount_ratio > 0 and cur_equity > 0:
+            max_ratio = float(max(0.0, max_trade_amount_ratio))
+            max_delta = (amount_row * max_ratio / max(cur_equity, 1e-12)).clip(lower=0.0)
+            raw_delta = eff_target - prev_eff_target
+            clipped_delta = raw_delta.clip(lower=-max_delta, upper=max_delta)
+            eff_target = (prev_eff_target + clipped_delta).clip(lower=0.0)
+
         eff_weights.loc[dt] = eff_target
 
         daily_ret = ret.loc[dt].fillna(0.0)
@@ -535,7 +545,7 @@ def run_rotation_backtest(
         turnover_t = float(delta_w.sum())
         fee_slippage_cost_t = turnover_t * cost_rate
 
-        amount_row = amount_df.loc[dt].reindex(delta_w.index).fillna(0.0).astype(float)
+        amount_row = amount_row.reindex(delta_w.index).fillna(0.0).astype(float)
         amount_sum = float(amount_row.sum())
         if impact_rate_base > 0 and amount_sum > 0:
             liq_share = amount_row / amount_sum
@@ -656,6 +666,7 @@ def run_from_local_cache(
     trend_strong_threshold: float = 0.03,
     trend_weak_threshold: float = 0.0,
     init_cash: float = 10000.0,
+    max_trade_amount_ratio: Optional[float] = None,
 ) -> BacktestResult:
     close = load_close_matrix(codes=codes, source=source)
     amount = load_amount_matrix(codes=codes, source=source).reindex(close.index).fillna(0.0)
@@ -724,6 +735,7 @@ def run_from_local_cache(
         top_n_weak=top_n_weak,
         trend_strong_threshold=trend_strong_threshold,
         trend_weak_threshold=trend_weak_threshold,
+        max_trade_amount_ratio=max_trade_amount_ratio,
     )
 
 
