@@ -115,6 +115,8 @@ operations:
     push_daily_detail: false
     push_on_anomaly: true
     push_trade_changes: true
+    trade_change_min_weight: 0.001
+    trade_change_min_notional: 10
     quality_fail_alert_count: 6
   health_alert:
     consecutive_red_days: 2

@@ -7,6 +7,7 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+TRADE_ALERT_STATE_PATH = ROOT / "reports" / "paper_rotation_trade_alert_state.json"
 
 from src.backtest.vectorbt_runner import (
     load_amount_matrix,
@@ -46,6 +47,21 @@ from src.reporting.feishu_push import push_dm
 from src.reporting.quantstats_report import generate_quantstats_html
 
 DEFAULT_CODES = ["510300", "159915"]
+
+
+def _load_trade_alert_state() -> dict:
+    if not TRADE_ALERT_STATE_PATH.exists():
+        return {}
+    try:
+        data = json.loads(TRADE_ALERT_STATE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_trade_alert_state(data: dict) -> None:
+    TRADE_ALERT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TRADE_ALERT_STATE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _discover_codes(source: str = "baostock", min_rows: int = 240):
@@ -630,20 +646,30 @@ def main():
     push_daily_detail = bool(cfg_notify.get("push_daily_detail", False))
     push_on_anomaly = bool(cfg_notify.get("push_on_anomaly", True))
     push_trade_changes = bool(cfg_notify.get("push_trade_changes", True))
+    trade_change_min_weight = float(cfg_notify.get("trade_change_min_weight", 0.001))
+    trade_change_min_notional = float(cfg_notify.get("trade_change_min_notional", 10.0))
 
     trade_buys = []
     trade_sells = []
-    latest_trade_date = pd.Timestamp(result.weights.index.max()).normalize() if len(result.weights) > 0 else None
-    today = pd.Timestamp.today().normalize()
-    is_trading_day_today = bool(today.weekday() < 5)
-    is_today_rebalanced = bool(latest_trade_date is not None and latest_trade_date == today and is_trading_day_today)
-
-    if len(result.weights) >= 2 and is_today_rebalanced:
-        cur_w = pd.to_numeric(result.weights.iloc[-1], errors="coerce").fillna(0.0)
-        prev_w = pd.to_numeric(result.weights.iloc[-2], errors="coerce").fillna(0.0)
-        delta_w = (cur_w - prev_w).sort_values(ascending=False)
-        trade_buys = [(str(k), float(v)) for k, v in delta_w.items() if v > 1e-4]
-        trade_sells = [(str(k), float(-v)) for k, v in delta_w.items() if v < -1e-4]
+    latest_trade_date = None
+    if not fills_df.empty and "date" in fills_df.columns:
+        fills_df["date"] = pd.to_datetime(fills_df["date"], errors="coerce")
+        fills_df["weight_change"] = pd.to_numeric(fills_df.get("weight_change"), errors="coerce")
+        fills_df["trade_notional"] = pd.to_numeric(fills_df.get("trade_notional"), errors="coerce")
+        fills_df = fills_df.dropna(subset=["date", "weight_change"]).copy()
+        if not fills_df.empty:
+            latest_trade_date = pd.Timestamp(fills_df["date"].max()).normalize()
+            day_fills = fills_df[fills_df["date"].dt.normalize() == latest_trade_date].copy()
+            day_fills = day_fills[
+                (day_fills["weight_change"].abs() >= trade_change_min_weight)
+                & (day_fills["trade_notional"].abs() >= trade_change_min_notional)
+            ]
+            if not day_fills.empty:
+                by_symbol = day_fills.groupby("symbol", as_index=False)[["weight_change", "trade_notional"]].sum()
+                buys = by_symbol[by_symbol["weight_change"] > 0].sort_values("weight_change", ascending=False)
+                sells = by_symbol[by_symbol["weight_change"] < 0].sort_values("weight_change", ascending=True)
+                trade_buys = [(str(r["symbol"]), float(r["weight_change"]), float(r["trade_notional"])) for _, r in buys.iterrows()]
+                trade_sells = [(str(r["symbol"]), float(-r["weight_change"]), float(abs(r["trade_notional"]))) for _, r in sells.iterrows()]
 
     if push_daily_detail or (push_on_anomaly and severe_anomaly):
         msg = (
@@ -658,12 +684,31 @@ def main():
         push_dm(msg)
 
     if push_trade_changes and (trade_buys or trade_sells):
+        daily_pnl = float(result.equity.iloc[-1] - result.equity.iloc[-2]) if len(result.equity) >= 2 else 0.0
+        total_pnl = float(result.equity.iloc[-1] - exec_params["init_cash"]) if len(result.equity) >= 1 else 0.0
+        total_ret = float(result.equity.iloc[-1] / max(exec_params["init_cash"], 1e-12) - 1.0) if len(result.equity) >= 1 else 0.0
+
+        date_str = str(latest_trade_date.date()) if latest_trade_date is not None else str(pd.Timestamp.today().date())
+        signature_payload = {
+            "date": date_str,
+            "buys": [(c, round(w, 6), round(n, 2)) for c, w, n in trade_buys],
+            "sells": [(c, round(w, 6), round(n, 2)) for c, w, n in trade_sells],
+        }
+        signature = json.dumps(signature_payload, ensure_ascii=False, sort_keys=True)
+        alert_state = _load_trade_alert_state()
+        if str(alert_state.get("last_signature", "")) == signature:
+            return
+
         trade_text = (
             "调仓提醒\n"
-            f"- 买入: {', '.join([f'{c}(+{w:.1%})' for c, w in trade_buys[:6]]) if trade_buys else '无'}\n"
-            f"- 卖出: {', '.join([f'{c}(-{w:.1%})' for c, w in trade_sells[:6]]) if trade_sells else '无'}"
+            f"- 交易日: {date_str}\n"
+            f"- 买入: {', '.join([f'{c}(+{w:.1%}, 约{n:.0f}元)' for c, w, n in trade_buys[:6]]) if trade_buys else '无'}\n"
+            f"- 卖出: {', '.join([f'{c}(-{w:.1%}, 约{n:.0f}元)' for c, w, n in trade_sells[:6]]) if trade_sells else '无'}\n"
+            f"- 当日盈亏: {daily_pnl:+.2f} 元\n"
+            f"- 累计盈亏: {total_pnl:+.2f} 元（{total_ret:+.2%}）"
         )
         push_dm(trade_text)
+        _save_trade_alert_state({"last_signature": signature, "updated_at": pd.Timestamp.now().isoformat()})
 
 
 if __name__ == "__main__":
