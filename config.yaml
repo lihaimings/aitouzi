@@ -93,6 +93,12 @@ report:
     daily: true
     weekly: true
     monthly: true
+macro_bridge:
+  enabled: true
+  source_json: /home/openclaw/work/macro_brain_platform/outputs/macro_narrative.json
+  output_json: reports/macro_brain_context.json
+  output_md: reports/macro_brain_context.md
+
 operations:
   preflight:
     fresh_days: 5
@@ -111,6 +117,9 @@ operations:
     max_drawdown_min: -0.20
     sharpe_min: 0.80
   backtest_validation:
+    min_years: 2
+    preferred_years: 5
+    trading_days_per_year: 240
     wf_train_days: 120
     wf_test_days: 20
     wf_step_days: 20
