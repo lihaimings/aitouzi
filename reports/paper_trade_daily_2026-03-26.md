@@ -1,6 +1,7 @@
-# 纸交易日报（A股/ETF）｜2026-03-26
+# 纸交易日报（A股/ETF）
 
-> 仅纸盘，不触发实盘。
+日期：2026-03-26
+口径：仅纸盘，不触发实盘
 
 ## 一、持仓
 - 当前持仓：空仓
@@ -11,19 +12,21 @@
 - 年化波动：0.68%
 - Sharpe：-0.41
 - 最大回撤：-5.81%
-- 年化Alpha：-0.17%
-- 统计区间：2005-02-23 ~ 2026-03-20
+- Sortino：-0.48
+- Calmar：-0.05
+- 年化 Alpha：-0.17%
 
 ## 三、风险摘要
 - 风控阈值状态：PASS
-- 详情：max_daily_drawdown / max_total_drawdown / max_position_weight 当前均为 PASS（见风控报告）。
+- 单日回撤检查：PASS（observed -0.0131，limit -0.0500）
+- 总回撤检查：PASS（observed -0.0581，limit -0.1500）
+- 单标的权重检查：PASS（observed 0.6000，limit 0.6000）
 
 ## 四、情绪/研究摘要
-- 研究结论：AI研究接口暂不可用，已回退为人工审阅模式。
+- AI研究接口当前不可用，系统回退人工审阅。
 - 过拟合风险评级：medium
-- 当前情绪口径：谨慎中性（以风控优先，暂不激进增配）。
+- 当前情绪口径：谨慎中性（以风控和人工复核为主）
 
-## 五、报告索引
-- 绩效：`reports/paper_rotation_daily.md`
-- 风控：`reports/paper_rotation_risk_guardrails.md`
-- AI审阅：`reports/paper_rotation_ai_review.md`
+## 五、备注
+- 本次日报基于当前最新纸盘报告产物整理。
+- 仅用于纸交易跟踪，不构成实盘指令。
