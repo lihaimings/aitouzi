@@ -21,49 +21,38 @@ def _run_step(cmd):
 def main():
     py = sys.executable
 
-    # 1) 刷新ETF池（目标200）
-    _run_step([py, "scripts/refresh_etf_universe.py", "--size", str(UNIVERSE_SIZE)])
-
-    # 2) 更新ETF缓存
+    # 1) 分层抓取（L0/L1/L2）：爬虫主、接口辅
     _run_step(
         [
             py,
-            "scripts/fetch_etf_cache.py",
-            "--universe-size",
+            "scripts/run_layered_fetch.py",
+            "--mode",
+            "full",
+            "--l1-size",
             str(UNIVERSE_SIZE),
-            "--max-retries",
-            "3",
-            "--source-order",
-            "ths,eastmoney,efinance,akshare,tushare,baostock",
-            "--retry-sleep",
-            "1",
-            "--fresh-tolerance-days",
-            "3",
-            "--skip-fallback-on-fresh",
-            "0",
-            "--min-bootstrap-rows",
-            "240",
-            "--bootstrap-batch-size",
-            "0",
-            "--repair-rounds",
-            "2",
-            "--repair-max-retries",
-            "4",
-            "--repair-cooldown-multiplier",
-            "1.5",
         ]
     )
 
-    # 3) 运行研究/纸盘主流程
+    # 2) 更新ETF元数据（上市时间/缓存深度）
+    _run_step([py, "scripts/build_etf_metadata.py", "--scope", "universe"])
+
+    # 2.5) 同步数据目录数据库（SQLite catalog）
+    _run_step([py, "scripts/sync_data_catalog_db.py"])
+
+    # 3) 同步宏观中台并生成宏观特征
+    _run_step([py, "scripts/load_macro_brain_context.py"])
+    _run_step([py, "scripts/build_macro_features.py"])
+
+    # 4) 运行 Preflight 检查
     _run_step([py, "scripts/run_preflight_check.py", "--strict"])
 
-    # 4) T+1 机制一致性校验
+    # 5) T+1 机制一致性校验
     _run_step([py, "scripts/run_tplus1_check.py"])
 
-    # 5) 运行研究/纸盘主流程
+    # 6) 运行研究/纸盘主流程
     _run_step([py, "scripts/run_paper_rotation.py"])
 
-    # 6) 系统健康报告
+    # 7) 系统健康报告
     _run_step([py, "scripts/run_system_health.py"])
 
     print("\n[done] daily pipeline finished")
