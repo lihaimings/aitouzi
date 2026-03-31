@@ -1,0 +1,95 @@
+{
+  "updated_at": "2026-03-31T16:55:48",
+  "codes": {
+    "510300": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:45.609863",
+      "added_rows": 10688,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_510300_15m.csv"
+    },
+    "510500": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:46.012105",
+      "added_rows": 10688,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_510500_15m.csv"
+    },
+    "159915": {
+      "ok": true,
+      "earliest_before": "2023-08-09 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:46.377745",
+      "added_rows": 1376,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_159915_15m.csv"
+    },
+    "511360": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:46.485141",
+      "added_rows": 10688,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_511360_15m.csv"
+    },
+    "511880": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:46.846667",
+      "added_rows": 10688,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_511880_15m.csv"
+    },
+    "511380": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:47.210030",
+      "added_rows": 10688,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_511380_15m.csv"
+    },
+    "511990": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:47.584520",
+      "added_rows": 10688,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_511990_15m.csv"
+    },
+    "513120": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2023-04-03 09:45:00",
+      "target_start": "2023-04-01 16:55:47.942962",
+      "added_rows": 10688,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_513120_15m.csv"
+    },
+    "159352": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2024-10-15 09:45:00",
+      "target_start": "2024-10-15 00:00:00",
+      "added_rows": 4784,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_159352_15m.csv"
+    },
+    "563360": {
+      "ok": true,
+      "earliest_before": "2026-01-05 09:45:00",
+      "earliest_after": "2024-10-15 09:45:00",
+      "target_start": "2024-10-15 00:00:00",
+      "added_rows": 4784,
+      "synthetic": true,
+      "path": "/home/openclaw/work/aitouzi/data/minute/etf_563360_15m.csv"
+    }
+  }
+}

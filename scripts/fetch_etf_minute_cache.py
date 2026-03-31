@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
@@ -65,6 +66,22 @@ def _load_codes(layer: str = "l2") -> List[str]:
 def _period_to_klt(period: str) -> str:
     mapping = {"1": "1", "5": "5", "15": "15", "30": "30", "60": "60"}
     return mapping.get(str(period), "15")
+
+
+def _load_listed_date_map() -> Dict[str, pd.Timestamp]:
+    p = ROOT / "data" / "etf_metadata.csv"
+    if not p.exists():
+        return {}
+    try:
+        d = pd.read_csv(p, dtype={"code": str})
+    except Exception:
+        return {}
+    if "code" not in d.columns or "listed_date" not in d.columns:
+        return {}
+    d["code"] = d["code"].astype(str).str.zfill(6)
+    d["listed_date"] = pd.to_datetime(d["listed_date"], errors="coerce")
+    d = d.dropna(subset=["listed_date"])
+    return {str(r.code): pd.Timestamp(r.listed_date) for r in d.itertuples(index=False)}
 
 
 def _to_bs_code(code: str) -> str:
@@ -249,16 +266,24 @@ def main() -> int:
     ap.add_argument("--resume", type=int, default=1)
     ap.add_argument("--max-retries", type=int, default=3)
     ap.add_argument("--base-sleep", type=float, default=0.8)
+    ap.add_argument("--target-years", type=float, default=3.0)
+    ap.add_argument("--recent-days", type=int, default=3)
+    ap.add_argument("--start-tolerance-days", type=int, default=10)
     args = ap.parse_args()
 
     codes = _load_codes(args.layer)
     if args.limit > 0:
         codes = codes[: args.limit]
 
+    listed_map = _load_listed_date_map()
+    now = pd.Timestamp(datetime.now())
+    default_target_start = now - pd.Timedelta(days=int(365.25 * float(args.target_years)))
+    recent_cutoff = now - pd.Timedelta(days=int(args.recent_days))
+
     state_path = STATE_DIR / f"minute_fetch_state_{args.layer}_{args.period}m.json"
     done = _read_done(state_path) if int(args.resume) == 1 else {}
 
-    ok, fail = 0, 0
+    ok, partial, fail = 0, 0, 0
     failed_codes = []
 
     for code in codes:
@@ -269,52 +294,71 @@ def main() -> int:
         err_msg = ""
         source_used = ""
 
+        target_start = max(listed_map.get(code, default_target_start), default_target_start)
+        best_df = None
+        best_source = ""
+
         for i in range(max(1, int(args.max_retries))):
-            try:
-                # crawler-first: tencent ifzq minute endpoint (works in current env)
-                df = fetch_one_tencent(code, period=args.period)
-                if df.empty:
-                    raise RuntimeError("empty from tencent")
-                source_used = "tencent-ifzq"
-                success = True
-                break
-            except Exception as e0:
+            source_fns = [
+                ("tencent-ifzq", fetch_one_tencent),
+                ("eastmoney-web", fetch_one_em),
+                ("akshare-fallback", fetch_one_ak),
+                ("baostock-fallback", fetch_one_bs),
+            ]
+            for sname, sfn in source_fns:
                 try:
-                    # fallback1: eastmoney web endpoint
-                    df = fetch_one_em(code, period=args.period)
-                    if df.empty:
-                        raise RuntimeError("empty from em")
-                    source_used = "eastmoney-web"
-                    success = True
-                    break
-                except Exception as e1:
-                    try:
-                        # fallback2: akshare wrapper
-                        df = fetch_one_ak(code, period=args.period)
-                        if df.empty:
-                            raise RuntimeError("empty from ak")
-                        source_used = "akshare-fallback"
+                    df_try = sfn(code, period=args.period)
+                    if df_try is None or df_try.empty:
+                        raise RuntimeError(f"empty from {sname}")
+                    df_try = df_try.sort_values("datetime").drop_duplicates("datetime", keep="last").reset_index(drop=True)
+                    cur_start = pd.to_datetime(df_try["datetime"].min(), errors="coerce")
+                    cur_end = pd.to_datetime(df_try["datetime"].max(), errors="coerce")
+
+                    if best_df is None:
+                        best_df, best_source = df_try, sname
+                    else:
+                        best_start = pd.to_datetime(best_df["datetime"].min(), errors="coerce")
+                        if (cur_start < best_start) or (cur_start == best_start and len(df_try) > len(best_df)):
+                            best_df, best_source = df_try, sname
+
+                    if (cur_start <= target_start + pd.Timedelta(days=int(args.start_tolerance_days))) and (cur_end >= recent_cutoff):
+                        df = df_try
+                        source_used = sname
                         success = True
                         break
-                    except Exception as e2:
-                        try:
-                            # fallback3: baostock minute history
-                            df = fetch_one_bs(code, period=args.period)
-                            if df.empty:
-                                raise RuntimeError("empty from baostock")
-                            source_used = "baostock-fallback"
-                            success = True
-                            break
-                        except Exception as e3:
-                            err_msg = f"{e0} | {e1} | {e2} | {e3}"
-                            time.sleep(float(args.base_sleep) * (2 ** i))
+                except Exception as e:
+                    err_msg = f"{err_msg} | {sname}:{e}" if err_msg else f"{sname}:{e}"
+            if success:
+                break
+            time.sleep(float(args.base_sleep) * (2 ** i))
+
+        if (not success) and (best_df is not None):
+            df = best_df
+            source_used = f"{best_source}(best-effort)"
+            success = True
 
         if success:
             out = DATA_DIR / f"etf_{code}_{args.period}m.csv"
             df.to_csv(out, index=False)
-            ok += 1
-            done[code] = {"status": "ok", "rows": int(len(df)), "source": source_used, "updated_at": pd.Timestamp.now().isoformat()}
-            print(f"[ok] {code} rows={len(df)} source={source_used} -> {out}")
+            sdt = pd.to_datetime(df["datetime"].min(), errors="coerce")
+            edt = pd.to_datetime(df["datetime"].max(), errors="coerce")
+            meets_target = bool((sdt <= target_start + pd.Timedelta(days=int(args.start_tolerance_days))) and (edt >= recent_cutoff))
+            if meets_target:
+                ok += 1
+            else:
+                partial += 1
+            done[code] = {
+                "status": "ok" if meets_target else "partial",
+                "rows": int(len(df)),
+                "source": source_used,
+                "min_datetime": str(sdt) if pd.notna(sdt) else None,
+                "max_datetime": str(edt) if pd.notna(edt) else None,
+                "target_start": str(target_start),
+                "meets_target": meets_target,
+                "updated_at": pd.Timestamp.now().isoformat(),
+            }
+            tag = "ok" if meets_target else "partial"
+            print(f"[{tag}] {code} rows={len(df)} source={source_used} -> {out}")
         else:
             fail += 1
             failed_codes.append(code)
@@ -329,6 +373,7 @@ def main() -> int:
         "period": args.period,
         "total": len(codes),
         "ok": ok,
+        "partial": partial,
         "fail": fail,
         "failed_codes": failed_codes,
         "updated_at": pd.Timestamp.now().isoformat(),
@@ -337,7 +382,7 @@ def main() -> int:
     report_path = REPORTS_DIR / f"minute_fetch_report_{args.layer}_{args.period}m.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"done: ok={ok}, fail={fail}, total={len(codes)}")
+    print(f"done: ok={ok}, partial={partial}, fail={fail}, total={len(codes)}")
     print(f"state: {state_path}")
     print(f"report: {report_path}")
     return 0 if fail == 0 else 2
