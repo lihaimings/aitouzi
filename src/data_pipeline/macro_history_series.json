@@ -1,0 +1,12 @@
+{
+  "default_years": 3,
+  "series": [
+    {"id": "DGS10", "name": "US10Y", "group": "rates"},
+    {"id": "DGS2", "name": "US2Y", "group": "rates"},
+    {"id": "DTWEXBGS", "name": "USD_BROAD", "group": "usd"},
+    {"id": "DFF", "name": "FED_FUNDS", "group": "rates"},
+    {"id": "WALCL", "name": "FED_BALANCE_SHEET", "group": "liquidity"},
+    {"id": "T10YIE", "name": "BREAKEVEN_10Y", "group": "inflation"},
+    {"id": "DCOILWTICO", "name": "WTI_SPOT", "group": "oil"}
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "updated_at": "2026-03-31 10:44:03",
+  "period": "15",
+  "symbols": {
+    "510300": {
+      "ok": true,
+      "rows": 512,
+      "min_datetime": "2026-02-05 09:45:00",
+      "max_datetime": "2026-03-30 15:00:00",
+      "source": "local_cache",
+      "path": "/home/openclaw/work/aitouzi/data/layers/processed/minute_history/etf_510300_15m.csv"
+    },
+    "159326": {
+      "ok": true,
+      "rows": 512,
+      "min_datetime": "2026-02-05 09:45:00",
+      "max_datetime": "2026-03-30 15:00:00",
+      "source": "local_cache",
+      "path": "/home/openclaw/work/aitouzi/data/layers/processed/minute_history/etf_159326_15m.csv"
+    },
+    "560860": {
+      "ok": false,
+      "error": "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    }
+  },
+  "summary": {
+    "ok": true,
+    "total": 3,
+    "ok_count": 2,
+    "success_rate": 0.6667
+  }
+}

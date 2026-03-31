@@ -1,0 +1,58 @@
+{
+  "updated_at": "2026-03-31 10:44:04",
+  "years": 3,
+  "series": {
+    "DGS10": {
+      "ok": true,
+      "rows": 780,
+      "min_date": "2023-04-03",
+      "max_date": "2026-03-27"
+    },
+    "DGS2": {
+      "ok": true,
+      "rows": 780,
+      "min_date": "2023-04-03",
+      "max_date": "2026-03-27"
+    },
+    "DTWEXBGS": {
+      "ok": true,
+      "rows": 780,
+      "min_date": "2023-04-03",
+      "max_date": "2026-03-27"
+    },
+    "DFF": {
+      "ok": true,
+      "rows": 1092,
+      "min_date": "2023-04-01",
+      "max_date": "2026-03-27"
+    },
+    "WALCL": {
+      "ok": true,
+      "rows": 156,
+      "min_date": "2023-04-05",
+      "max_date": "2026-03-25"
+    },
+    "T10YIE": {
+      "ok": true,
+      "rows": 781,
+      "min_date": "2023-04-03",
+      "max_date": "2026-03-30"
+    },
+    "DCOILWTICO": {
+      "ok": true,
+      "rows": 776,
+      "min_date": "2023-04-03",
+      "max_date": "2026-03-23"
+    }
+  },
+  "summary": {
+    "ok": true,
+    "series_total": 7,
+    "series_ok": 7,
+    "success_rate": 1.0,
+    "merged_rows": 1093,
+    "merged_min_date": "2023-04-01",
+    "merged_max_date": "2026-03-30",
+    "merged_path": "/home/openclaw/work/aitouzi/data/layers/processed/macro_history/macro_history_3y_merged.csv"
+  }
+}
