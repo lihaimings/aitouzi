@@ -97,6 +97,7 @@
 2) 折溢价阈值依赖 `reports/etf_premium_discount_snapshot.csv`，若该快照缺失则仅执行降级逻辑（不硬过滤）。
 3) 代码工作树仍存在非本轮改造遗留改动，后续需要做一次“提交面清理”。
 4) L1 单标的 `159949` 仍未满足“近期新鲜度”口径：当前缓存到 2026-03-13；东财/AK/efinance 链路在当前网络环境下均出现 `RemoteDisconnected`，需切换备用抓取通道或网络出口后补齐。
+5) 已新增 JoinQuant 真实分钟抓取脚本 `scripts/fetch_etf_minute_jq.py`，当前阻塞为缺少 `JQ_USERNAME/JQ_PASSWORD` 凭据，待补充后可执行 L1/L2 分组抓取。
 
 ---
 
