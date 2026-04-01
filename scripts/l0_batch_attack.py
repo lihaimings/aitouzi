@@ -150,8 +150,8 @@ def main() -> int:
                 time.sleep(max(1, args.sleep_seconds))
 
         if not solved:
-            # continue next batch in next manual run
-            break
+            # continue to next batch; unresolved batch can be retried in later rounds/reruns
+            continue
 
     progress["updated_at"] = datetime.now().isoformat(timespec="seconds")
     REPORT_JSON.write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
