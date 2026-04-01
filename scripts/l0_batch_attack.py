@@ -69,7 +69,7 @@ def run_fetch(codes_file: Path, limit: int, source_order: str, retries: int, rep
 
 def probe(batch_file: Path, probe_size: int) -> dict:
     results = {}
-    for src in ["ths", "eastmoney", "akshare"]:
+    for src in ["ths", "eastmoney", "tencent", "sina", "netease", "akshare"]:
         results[src] = run_fetch(batch_file, probe_size, src, retries=1, repair_rounds=0)
     return results
 
@@ -117,6 +117,9 @@ def main() -> int:
                 "round": r,
                 "probe_ok_ths": p["ths"]["ok"],
                 "probe_ok_eastmoney": p["eastmoney"]["ok"],
+                "probe_ok_tencent": p["tencent"]["ok"],
+                "probe_ok_sina": p["sina"]["ok"],
+                "probe_ok_netease": p["netease"]["ok"],
                 "probe_ok_akshare": p["akshare"]["ok"],
                 "best_source": best_src,
                 "best_ok": best_ok,

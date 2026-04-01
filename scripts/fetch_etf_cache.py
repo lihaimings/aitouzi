@@ -17,6 +17,9 @@ from src.data_pipeline.akshare_loader import fetch_etf_daily as ak_fetch
 from src.data_pipeline.baostock_loader import fetch_k_daily as bs_fetch
 from src.data_pipeline.eastmoney_loader import fetch_etf_daily as em_fetch
 from src.data_pipeline.ths_loader import fetch_etf_daily as ths_fetch
+from src.data_pipeline.tencent_loader import fetch_etf_daily as tx_fetch
+from src.data_pipeline.sina_loader import fetch_etf_daily as sina_fetch
+from src.data_pipeline.netease_loader import fetch_etf_daily as netease_fetch
 from src.data_pipeline.tushare_loader import fetch_etf_daily as ts_fetch
 from src.data_pipeline.universe import load_universe_codes
 
@@ -140,6 +143,14 @@ def _compute_start_date(existing: pd.DataFrame, backfill_days: int) -> str:
     return start
 
 
+def _compute_force_start_date(force_full_history: bool, manual_start: str) -> Optional[str]:
+    if str(manual_start).strip():
+        return str(manual_start).strip()
+    if bool(force_full_history):
+        return "19900101"
+    return None
+
+
 def _source_funcs() -> Dict[str, Callable[[str, str, str], pd.DataFrame]]:
     def ths(code: str, start: str, end: str) -> pd.DataFrame:
         return ths_fetch(code, beg=start, end=end)
@@ -158,10 +169,22 @@ def _source_funcs() -> Dict[str, Callable[[str, str, str], pd.DataFrame]]:
     def ts(code: str, _start: str, _end: str) -> pd.DataFrame:
         return ts_fetch(code)
 
+    def tx(code: str, start: str, end: str) -> pd.DataFrame:
+        return tx_fetch(code, beg=start, end=end)
+
+    def sina(code: str, start: str, end: str) -> pd.DataFrame:
+        return sina_fetch(code, beg=start, end=end)
+
+    def netease(code: str, start: str, end: str) -> pd.DataFrame:
+        return netease_fetch(code, beg=start, end=end)
+
     out: Dict[str, Callable[[str, str, str], pd.DataFrame]] = {
         "ths": ths,
         "eastmoney": em,
         "akshare": ak,
+        "tencent": tx,
+        "sina": sina,
+        "netease": netease,
         "baostock": bs,
         "tushare": ts,
     }
@@ -181,9 +204,10 @@ def _fetch_one_code(
     skip_fallback_on_fresh: bool,
     jump_fail_threshold: float,
     volume_spike_multiple: float,
+    force_start_date: Optional[str],
 ) -> Dict:
     existing = _read_existing(code)
-    start = _compute_start_date(existing, backfill_days=backfill_days)
+    start = str(force_start_date) if force_start_date else _compute_start_date(existing, backfill_days=backfill_days)
     end = _today_ymd()
     funcs = _source_funcs()
 
@@ -343,7 +367,7 @@ def _append_fetch_history(run_id: str, summary: pd.DataFrame, duration_sec: floa
     return FETCH_HISTORY_PATH
 
 
-def _iter_codes(custom_codes: Optional[Iterable[str]], universe_size: int) -> List[str]:
+def _iter_codes(custom_codes: Optional[Iterable[str]], universe_size: int, codes_file: Optional[str] = None) -> List[str]:
     def normalize(code: str) -> str:
         s = str(code).strip()
         if s.endswith(".0"):
@@ -371,7 +395,24 @@ def _iter_codes(custom_codes: Optional[Iterable[str]], universe_size: int) -> Li
         except Exception:
             return []
 
-    base = list(custom_codes) if custom_codes else load_universe_codes(target_size=universe_size)
+    file_codes: List[str] = []
+    if codes_file:
+        p = Path(str(codes_file))
+        if p.exists():
+            try:
+                if p.suffix.lower() in {".csv"}:
+                    t = pd.read_csv(p)
+                    col = "code" if "code" in t.columns else t.columns[0]
+                    file_codes = [normalize(x) for x in t[col].dropna().astype(str).tolist()]
+                else:
+                    file_codes = [normalize(x) for x in p.read_text(encoding="utf-8", errors="ignore").splitlines() if str(x).strip()]
+            except Exception:
+                file_codes = []
+
+    if file_codes:
+        base = file_codes
+    else:
+        base = list(custom_codes) if custom_codes else load_universe_codes(target_size=universe_size)
     if not base:
         base = list(ETF_LIST)
 
@@ -415,6 +456,7 @@ def _run_fetch_pass(
     jump_fail_threshold: float,
     volume_spike_multiple: float,
     cooldown: float,
+    force_start_date: Optional[str],
 ) -> List[Dict]:
     out: List[Dict] = []
     for code in codes:
@@ -429,6 +471,7 @@ def _run_fetch_pass(
             skip_fallback_on_fresh=bool(skip_fallback_on_fresh),
             jump_fail_threshold=max(0.01, float(jump_fail_threshold)),
             volume_spike_multiple=max(1.0, float(volume_spike_multiple)),
+            force_start_date=force_start_date,
         )
         out.append(r)
         print(
@@ -451,9 +494,10 @@ def main() -> int:
     run_id = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
     parser = argparse.ArgumentParser(description="Fetch ETF cache with robust free-source fallback")
     parser.add_argument("--codes", nargs="*", default=None, help="Optional ETF code list")
+    parser.add_argument("--codes-file", default="", help="Optional file path for codes (.csv with code column, or txt lines)")
     parser.add_argument("--universe-size", type=int, default=200, help="Universe size when codes not provided")
     parser.add_argument("--limit", type=int, default=0, help="Optional cap on number of codes for quick checks")
-    parser.add_argument("--source-order", default="ths,eastmoney,efinance,akshare,tushare,baostock")
+    parser.add_argument("--source-order", default="ths,eastmoney,tencent,sina,netease,akshare")
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--retry-sleep", type=float, default=2.0)
     parser.add_argument("--backfill-days", type=int, default=10)
@@ -463,18 +507,28 @@ def main() -> int:
     parser.add_argument("--cooldown", type=float, default=0.3)
     parser.add_argument("--bootstrap-batch-size", type=int, default=0, help="How many new symbols to bootstrap; 0 means full universe every run")
     parser.add_argument("--repair-rounds", type=int, default=2, help="Extra repair rounds for stale/pending symbols")
-    parser.add_argument("--repair-source-order", default="baostock,akshare,ths,eastmoney,efinance,tushare")
+    parser.add_argument("--repair-source-order", default="eastmoney,ths,tencent,sina,netease,akshare")
     parser.add_argument("--repair-max-retries", type=int, default=4)
     parser.add_argument("--repair-cooldown-multiplier", type=float, default=1.5)
     parser.add_argument("--jump-fail-threshold", type=float, default=0.15, help="Fail fetch if absolute daily jump exceeds threshold")
     parser.add_argument("--volume-spike-multiple", type=float, default=10.0, help="Warn when volume spikes above rolling median multiple")
+    parser.add_argument("--force-full-history", type=int, default=0, help="1 means force historical backfill from early date")
+    parser.add_argument("--force-start-date", default="", help="Manual backfill start date, e.g. 20080101")
+    parser.add_argument("--crawler-only", type=int, default=1, help="1 means only use crawler/public-web sources(ths/eastmoney/tencent/sina/netease)")
     parser.add_argument("--strict", action="store_true", help="Return non-zero when failed exists")
     args = parser.parse_args()
 
-    codes = _iter_codes(args.codes, universe_size=max(20, args.universe_size))
+    codes = _iter_codes(args.codes, universe_size=max(20, args.universe_size), codes_file=args.codes_file)
     if args.limit and args.limit > 0:
         codes = codes[: args.limit]
     source_order = [x.strip() for x in args.source_order.split(",") if x.strip()]
+    if bool(int(args.crawler_only)):
+        crawler_sources = {"ths", "eastmoney", "tencent", "sina", "netease"}
+        source_order = [x for x in source_order if x in crawler_sources]
+        if not source_order:
+            source_order = ["ths", "eastmoney", "tencent", "sina", "netease"]
+
+    force_start_date = _compute_force_start_date(force_full_history=bool(int(args.force_full_history)), manual_start=args.force_start_date)
 
     existing_codes = [c for c in codes if _canonical_path(c).exists()]
     new_codes = [c for c in codes if not _canonical_path(c).exists()]
@@ -499,11 +553,17 @@ def main() -> int:
         jump_fail_threshold=max(0.01, float(args.jump_fail_threshold)),
         volume_spike_multiple=max(1.0, float(args.volume_spike_multiple)),
         cooldown=max(0.0, args.cooldown),
+        force_start_date=force_start_date,
     )
     for r in first_pass:
         results_by_code[str(r.get("code"))] = r
 
     repair_source_order = [x.strip() for x in str(args.repair_source_order).split(",") if x.strip()]
+    if bool(int(args.crawler_only)):
+        crawler_sources = {"ths", "eastmoney", "tencent", "sina", "netease"}
+        repair_source_order = [x for x in repair_source_order if x in crawler_sources]
+        if not repair_source_order:
+            repair_source_order = ["eastmoney", "ths", "tencent", "sina", "netease"]
     repair_rounds = max(0, int(args.repair_rounds))
     repair_retry = max(int(args.max_retries), int(args.repair_max_retries))
     repair_cooldown = max(0.0, float(args.cooldown) * max(0.0, float(args.repair_cooldown_multiplier)))
@@ -534,6 +594,7 @@ def main() -> int:
             jump_fail_threshold=max(0.01, float(args.jump_fail_threshold)),
             volume_spike_multiple=max(1.0, float(args.volume_spike_multiple)),
             cooldown=repair_cooldown,
+            force_start_date=force_start_date,
         )
         for r in repaired:
             code = str(r.get("code"))
