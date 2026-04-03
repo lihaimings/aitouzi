@@ -54,14 +54,15 @@
 - [x] 输出 `green/yellow/red`
 - [x] 输出动作建议：`gross_exposure_mult / turnover_mult / allow_new_entries`
 - [x] 输出 JSON + Markdown 快照
-- [ ] 后续接入 `run_paper_rotation.py` 主流程前置约束（v1.1）
+- [x] 已接入 `run_paper_rotation.py` 主流程前置约束（2026-04-03 完成）
 
 ### M2 ETF 分型策略框架
 - [x] 规则分类：按 ETF 名称标签映射到 5 大类
 - [x] 输出 `strategy_class / strategy_template / monitor_template / backtest_template`
 - [x] 支持样本宇宙 fallback（无市场快照时仍可跑）
 - [x] 输出分类统计摘要
-- [ ] 后续接入 ETF 元数据源增强分类准确率（v1.1）
+- [x] 已接入主流程分型快照与模板路由（2026-04-03 完成）
+- [ ] 后续接入 ETF 元数据源进一步增强分类准确率（v1.2）
 
 ### M3 各分型最小可用监控模板
 - [x] broad_index monitor

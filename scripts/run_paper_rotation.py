@@ -93,6 +93,14 @@ def _discover_codes(source: str = "baostock", min_rows: int = 240):
                 discovered.append(parts[1])
 
     discovered = sorted(set(discovered))
+    max_codes_env = os.getenv("PAPER_ROTATION_MAX_CODES", "").strip()
+    if max_codes_env:
+        try:
+            max_codes = max(1, int(max_codes_env))
+            discovered = discovered[:max_codes]
+        except Exception:
+            pass
+
     if discovered:
         return discovered
 
