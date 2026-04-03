@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+from html import escape
 from pathlib import Path
 
 import pandas as pd
@@ -45,6 +46,14 @@ from src.paper_trade import fills_to_frame, simulate_paper_trades
 from src.reporting import render_markdown_report, save_report
 from src.reporting.feishu_push import push_dm
 from src.reporting.quantstats_report import generate_quantstats_html
+from src.strategy import (
+    build_backtest_template,
+    build_gatekeeper_metrics,
+    classify_etf_frame,
+    load_class_config,
+    load_gatekeeper_config,
+    score_gatekeeper,
+)
 
 DEFAULT_CODES = ["510300", "159915"]
 
@@ -98,6 +107,91 @@ def _pick_benchmark(codes):
     return codes[0]
 
 
+def _save_backtest_dashboard_html(
+    result,
+    metrics: dict,
+    window_snapshot: dict,
+    validity: dict,
+    exec_params: dict,
+) -> Path:
+    out = ROOT / "reports" / "paper_rotation_backtest_dashboard.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    eq = result.equity.copy()
+    if len(eq) > 500:
+        eq = eq.iloc[:: max(1, len(eq) // 500)]
+    if len(eq) < 2:
+        polyline = ""
+    else:
+        e_min = float(eq.min())
+        e_max = float(eq.max())
+        span = max(1e-12, e_max - e_min)
+        pts = []
+        n = len(eq) - 1
+        for i, v in enumerate(eq.tolist()):
+            x = 20 + (760 * i / max(1, n))
+            y = 240 - (180 * (float(v) - e_min) / span)
+            pts.append(f"{x:.1f},{y:.1f}")
+        polyline = " ".join(pts)
+
+    html = f"""<!doctype html>
+<html lang=\"zh-CN\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>策略回测看板</title>
+  <style>
+    body {{ font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; margin: 0; background: #f6f8fb; color: #223; }}
+    .wrap {{ max-width: 980px; margin: 24px auto; padding: 0 16px; }}
+    .card {{ background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 2px 10px rgba(20,40,80,.06); }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }}
+    .k {{ color: #667; font-size: 13px; }}
+    .v {{ font-size: 20px; font-weight: 700; margin-top: 4px; }}
+    .ok {{ color: #1f7a42; }} .warn {{ color: #b87312; }} .fail {{ color: #9d1b1b; }}
+    a {{ color: #1460d2; text-decoration: none; }}
+  </style>
+</head>
+<body>
+  <div class=\"wrap\">
+    <div class=\"card\">
+      <h2 style=\"margin:0 0 8px;\">ETF策略回测看板</h2>
+      <div class=\"k\">区间：{escape(str(window_snapshot.get('start')))} ~ {escape(str(window_snapshot.get('end')))} | 交易日 {int(window_snapshot.get('trading_days', 0))}</div>
+    </div>
+
+    <div class=\"card grid\">
+      <div><div class=\"k\">累计收益</div><div class=\"v\">{float(metrics.get('total_return', 0.0)):+.2%}</div></div>
+      <div><div class=\"k\">年化收益</div><div class=\"v\">{float(metrics.get('annual_return', 0.0)):+.2%}</div></div>
+      <div><div class=\"k\">最大回撤</div><div class=\"v\">{float(metrics.get('max_drawdown', 0.0)):.2%}</div></div>
+      <div><div class=\"k\">Sharpe</div><div class=\"v\">{float(metrics.get('sharpe', 0.0)):.2f}</div></div>
+      <div><div class=\"k\">总成本(比例)</div><div class=\"v\">{float(metrics.get('cost_total', 0.0)):.4f}</div></div>
+      <div><div class=\"k\">回测有效性评分</div><div class=\"v\">{int(validity.get('score', 0))}/100</div></div>
+    </div>
+
+    <div class=\"card\">
+      <div class=\"k\" style=\"margin-bottom:8px;\">净值曲线（抽样）</div>
+      <svg viewBox=\"0 0 800 260\" width=\"100%\" height=\"260\" style=\"background:#fcfdff;border-radius:8px;\">
+        <polyline points=\"{polyline}\" fill=\"none\" stroke=\"#1460d2\" stroke-width=\"2\" />
+      </svg>
+    </div>
+
+    <div class=\"card\">
+      <div class=\"k\">执行与风控</div>
+      <div>起始资金：{float(exec_params.get('init_cash', 0.0)):.2f} | 单日成交额占比上限：{float(exec_params.get('max_trade_amount_ratio', 0.0)):.2%}</div>
+      <div>成交时间：{escape(str(exec_params.get('execution_time', '14:50')))} | 成本：fee={float(exec_params.get('fee_bps', 0.0))}bps, slippage={float(exec_params.get('slippage_bps', 0.0))}bps, impact={float(exec_params.get('impact_bps', 0.0))}bps</div>
+    </div>
+
+    <div class=\"card\">
+      <div class=\"k\">本地文件</div>
+      <div><a href=\"paper_rotation_daily.md\">日报</a> | <a href=\"paper_rotation_quantstats.html\">QuantStats</a> | <a href=\"paper_rotation_equity.csv\">净值CSV</a> | <a href=\"paper_rotation_walk_forward.csv\">WalkForward</a></div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+    out.write_text(html, encoding="utf-8")
+    return out
+
+
 def _try_generate_quantstats(result):
     try:
         return generate_quantstats_html(
@@ -144,6 +238,179 @@ def _load_config() -> dict:
     except Exception as e:
         print(f"[warn] config.yaml parse failed: {e}")
         return {}
+
+
+def _clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def _extract_code6(v: object) -> str:
+    s = str(v or "")
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits[-6:] if len(digits) >= 6 else ""
+
+
+def _load_universe_name_map() -> dict:
+    path = ROOT / "reports" / "etf_market_snapshot_raw.csv"
+    if not path.exists():
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return {}
+
+    code_col = None
+    for c in ["code", "代码", "基金代码", "symbol"]:
+        if c in df.columns:
+            code_col = c
+            break
+
+    name_col = None
+    for c in ["name", "名称", "基金简称", "symbol_name"]:
+        if c in df.columns:
+            name_col = c
+            break
+
+    if code_col is None or name_col is None:
+        return {}
+
+    out = {}
+    for _, r in df[[code_col, name_col]].dropna().iterrows():
+        code6 = _extract_code6(r[code_col])
+        if code6:
+            out[code6] = str(r[name_col])
+    return out
+
+
+def _build_classification_snapshot(codes) -> tuple[pd.DataFrame, dict]:
+    code_name_map = _load_universe_name_map()
+    rows = [{"code": str(c), "name": code_name_map.get(str(c), str(c))} for c in list(codes)]
+    base_df = pd.DataFrame(rows)
+    cls_cfg = load_class_config()
+    cls_df = classify_etf_frame(base_df, config=cls_cfg)
+
+    class_counts = (
+        cls_df["strategy_class"].value_counts().sort_values(ascending=False).to_dict()
+        if not cls_df.empty and "strategy_class" in cls_df.columns
+        else {}
+    )
+    dominant_class = next(iter(class_counts.keys()), "broad_index") if class_counts else "broad_index"
+    dominant_backtest_template = "broad_index_backtest"
+    if not cls_df.empty and "strategy_class" in cls_df.columns and "backtest_template" in cls_df.columns:
+        hit = cls_df[cls_df["strategy_class"] == dominant_class]
+        if not hit.empty:
+            dominant_backtest_template = str(hit.iloc[0]["backtest_template"])
+
+    snapshot = {
+        "universe_size": int(len(cls_df)),
+        "class_counts": {str(k): int(v) for k, v in class_counts.items()},
+        "dominant_class": str(dominant_class),
+        "dominant_backtest_template": str(dominant_backtest_template),
+    }
+    return cls_df, snapshot
+
+
+def _build_gatekeeper_raw_metrics(benchmark_code: str, quality_df: pd.DataFrame, source: str = "baostock") -> dict:
+    macro_risk = 0.5
+    drawdown_risk = 0.5
+    volatility_risk = 0.5
+
+    try:
+        bench_df = load_close_matrix(codes=[benchmark_code], source=source)
+        bench = bench_df[benchmark_code].dropna() if benchmark_code in bench_df.columns else pd.Series(dtype=float)
+        if len(bench) >= 30:
+            ret = bench.pct_change(fill_method=None)
+            ma120 = bench.rolling(120).mean()
+            roll120 = bench.rolling(120).max()
+            trend = float(bench.iloc[-1] / ma120.iloc[-1] - 1.0) if pd.notna(ma120.iloc[-1]) and ma120.iloc[-1] != 0 else 0.0
+            vol20 = float(ret.rolling(20).std().iloc[-1]) if pd.notna(ret.rolling(20).std().iloc[-1]) else 0.02
+            dd120 = float(bench.iloc[-1] / roll120.iloc[-1] - 1.0) if pd.notna(roll120.iloc[-1]) and roll120.iloc[-1] != 0 else -0.05
+
+            if trend >= 0.05:
+                trend_risk = 0.15
+            elif trend >= 0.02:
+                trend_risk = 0.30
+            elif trend >= 0.00:
+                trend_risk = 0.50
+            elif trend >= -0.03:
+                trend_risk = 0.70
+            else:
+                trend_risk = 0.90
+
+            if vol20 <= 0.012:
+                vol_risk = 0.20
+            elif vol20 <= 0.018:
+                vol_risk = 0.40
+            elif vol20 <= 0.025:
+                vol_risk = 0.65
+            else:
+                vol_risk = 0.85
+
+            if dd120 >= -0.05:
+                dd_risk = 0.25
+            elif dd120 >= -0.10:
+                dd_risk = 0.45
+            elif dd120 >= -0.15:
+                dd_risk = 0.70
+            else:
+                dd_risk = 0.90
+
+            macro_risk = _clamp01(0.6 * trend_risk + 0.4 * vol_risk)
+            volatility_risk = _clamp01(vol_risk)
+            drawdown_risk = _clamp01(dd_risk)
+    except Exception:
+        pass
+
+    breadth_risk = 0.50
+    try:
+        total = max(1, int(len(quality_df)))
+        fail_n = int((quality_df["severity"] == "FAIL").sum()) if not quality_df.empty and "severity" in quality_df.columns else 0
+        warn_n = int((quality_df["severity"] == "WARN").sum()) if not quality_df.empty and "severity" in quality_df.columns else 0
+        fail_ratio = fail_n / total
+        warn_ratio = warn_n / total
+        breadth_risk = _clamp01(0.30 + fail_ratio * 1.4 + warn_ratio * 0.5)
+    except Exception:
+        pass
+
+    return {
+        "macro_risk": macro_risk,
+        "drawdown_risk": drawdown_risk,
+        "breadth_risk": breadth_risk,
+        "volatility_risk": volatility_risk,
+    }
+
+
+def _apply_gatekeeper_to_exec_params(exec_params: dict, gate_result) -> dict:
+    out = dict(exec_params)
+    actions = gate_result.actions if gate_result is not None else {}
+    gross_mult = float(actions.get("gross_exposure_mult", 1.0))
+    turnover_mult = float(actions.get("turnover_mult", 1.0))
+    allow_new_entries = bool(actions.get("allow_new_entries", True))
+
+    out["target_vol_ann"] = max(0.01, float(out["target_vol_ann"]) * gross_mult)
+    out["max_turnover"] = max(0.05, min(1.0, float(out["max_turnover"]) * turnover_mult))
+
+    if not allow_new_entries:
+        out["min_score"] = max(float(out["min_score"]), 1.0)
+        out["buy_threshold"] = max(float(out["buy_threshold"]), 1.0)
+
+    out["gatekeeper_state"] = str(getattr(gate_result, "state", "green"))
+    out["gatekeeper_score"] = float(getattr(gate_result, "score", 0.0))
+    out["gatekeeper_actions"] = actions
+    return out
+
+
+def _apply_class_template_to_exec_params(exec_params: dict, cls_snapshot: dict) -> dict:
+    out = dict(exec_params)
+    template_name = str(cls_snapshot.get("dominant_backtest_template", "broad_index_backtest"))
+    template = build_backtest_template(template_name)
+
+    out["fee_bps"] = max(float(out["fee_bps"]), float(template.get("fee_bps", out["fee_bps"])))
+    out["slippage_bps"] = max(float(out["slippage_bps"]), float(template.get("slippage_bps", out["slippage_bps"])))
+    out["top_n"] = max(1, min(int(out["top_n"]), int(template.get("holding_limit", out["top_n"]))))
+    out["dominant_strategy_class"] = str(cls_snapshot.get("dominant_class", "broad_index"))
+    out["dominant_backtest_template"] = template_name
+    return out
 
 
 def _build_window_snapshot(result, benchmark_code: str, source: str = "baostock") -> dict:
@@ -238,9 +505,14 @@ def _backtest_validity_score(window_snapshot: dict, wf_table: pd.DataFrame, qual
 
 
 def main():
-    codes = _discover_codes(source="baostock")
-    benchmark_code = _pick_benchmark(codes)
     cfg = _load_config()
+    cfg_backtest = (((cfg.get("operations") or {}).get("backtest_validation") or {}) if isinstance(cfg, dict) else {})
+    trading_days_per_year = int(cfg_backtest.get("trading_days_per_year", 240))
+    min_backtest_years = float(cfg_backtest.get("min_years", 2.0))
+    discover_min_rows = max(240, int(trading_days_per_year * min_backtest_years))
+
+    codes = _discover_codes(source="baostock", min_rows=discover_min_rows)
+    benchmark_code = _pick_benchmark(codes)
 
     cfg_risk_limits = (((cfg.get("trading") or {}).get("risk_limits") or {}) if isinstance(cfg, dict) else {})
     cfg_cost_model = (((cfg.get("trading") or {}).get("cost_model") or {}) if isinstance(cfg, dict) else {})
@@ -254,7 +526,6 @@ def main():
     cfg_quality = (((cfg.get("operations") or {}).get("quality_redline") or {}) if isinstance(cfg, dict) else {})
     cfg_targets = (((cfg.get("operations") or {}).get("simulation_targets") or {}) if isinstance(cfg, dict) else {})
     cfg_notify = (((cfg.get("operations") or {}).get("notify") or {}) if isinstance(cfg, dict) else {})
-    cfg_backtest = (((cfg.get("operations") or {}).get("backtest_validation") or {}) if isinstance(cfg, dict) else {})
     cfg_regime = (((cfg.get("research") or {}).get("regime") or {}) if isinstance(cfg, dict) else {})
     cfg_ai_review = ((((cfg.get("research") or {}).get("ai_review") or {}).get("enabled")) if isinstance(cfg, dict) else True)
     cfg_trading = ((cfg.get("trading") or {}) if isinstance(cfg, dict) else {})
@@ -328,6 +599,26 @@ def main():
         missing_ratio_warn=float(cfg_quality.get("missing_ratio_warn", 0.01)),
     )
     quality_csv_path, quality_md_path = save_quality_reports(quality_df, prefix="paper_rotation")
+
+    class_df, class_snapshot = _build_classification_snapshot(codes)
+    class_snapshot_path = ROOT / "reports" / "paper_rotation_strategy_class_snapshot.json"
+    class_snapshot_path.write_text(json.dumps(class_snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    class_csv_path = ROOT / "reports" / "paper_rotation_strategy_classification.csv"
+    class_df.to_csv(class_csv_path, index=False, encoding="utf-8-sig")
+
+    gate_cfg = load_gatekeeper_config()
+    gate_raw_metrics = _build_gatekeeper_raw_metrics(
+        benchmark_code=benchmark_code,
+        quality_df=quality_df,
+        source="baostock",
+    )
+    gate_metrics = build_gatekeeper_metrics(gate_raw_metrics)
+    gate_result = score_gatekeeper(gate_metrics, config=gate_cfg)
+    gate_snapshot_path = ROOT / "reports" / "paper_rotation_gatekeeper.json"
+    gate_snapshot_path.write_text(json.dumps(gate_result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    exec_params = _apply_class_template_to_exec_params(exec_params, class_snapshot)
+    exec_params = _apply_gatekeeper_to_exec_params(exec_params, gate_result)
 
     baseline_result = run_from_local_cache(
         codes=codes,
@@ -658,6 +949,13 @@ def main():
         quality_df=quality_df,
         cost_total=float(result.metrics.get("cost_total", 0.0)),
     )
+    dashboard_path = _save_backtest_dashboard_html(
+        result=result,
+        metrics=result.metrics,
+        window_snapshot=window_snapshot,
+        validity=validity,
+        exec_params=exec_params,
+    )
 
     best_stab = stability_df.iloc[0].to_dict() if not stability_df.empty else {}
     best_benchmark = benchmark_df.iloc[0].to_dict() if not benchmark_df.empty else {}
@@ -688,6 +986,9 @@ def main():
     summary = (
         f"纸盘运行完成（风险状态: {risk_review.get('status', 'PASS')}）\n"
         f"- 执行参数: {exec_params}\n"
+        f"- 总闸门: state={exec_params.get('gatekeeper_state')}, score={exec_params.get('gatekeeper_score'):.4f}, actions={exec_params.get('gatekeeper_actions')}\n"
+        f"- 分型主类: {exec_params.get('dominant_strategy_class')} | 模板: {exec_params.get('dominant_backtest_template')}\n"
+        f"- 分型统计: {class_snapshot.get('class_counts', {})}\n"
         f"- 审批参数文件: {approved_path}\n"
         f"- 基准: {benchmark_code}\n"
         f"- 数据质量: {quality_counts}\n"
@@ -717,6 +1018,7 @@ def main():
         f"- 行情覆盖: {window_snapshot.get('regime_days')}\n"
         f"- 回测有效性评分: {validity.get('score')}/100 | checks={validity.get('checks')}\n"
         f"- WalkForward配置: train={wf_train_days}, test={wf_test_days}, step={wf_step_days}, windows={validity.get('wf_windows')}\n"
+        f"- 本地回测看板: {dashboard_path}\n"
         f"- 报告文件: {report_path}\n"
         f"- WalkForward窗口表: {wf_table_path}\n"
         f"- WalkForward净值: {wf_equity_path}\n"
@@ -728,6 +1030,9 @@ def main():
         f"- 研究建议JSON: {rec_json_path}\n"
         f"- 研究建议MD: {rec_md_path}\n"
         f"- 研究建议决策: {recommendation.get('decision')}\n"
+        f"- 分型快照CSV: {class_csv_path}\n"
+        f"- 分型快照JSON: {class_snapshot_path}\n"
+        f"- 总闸门快照JSON: {gate_snapshot_path}\n"
         f"- 风控检查JSON: {risk_json_path}\n"
         f"- 风控检查MD: {risk_md_path}\n"
         f"- 风控失败项: {risk_review.get('fail_items', [])}\n"

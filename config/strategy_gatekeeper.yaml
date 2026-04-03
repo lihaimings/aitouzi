@@ -1,0 +1,25 @@
+gatekeeper:
+  score_weights:
+    macro_risk: 0.35
+    drawdown_risk: 0.25
+    breadth_risk: 0.20
+    volatility_risk: 0.20
+  thresholds:
+    green_max: 0.33
+    yellow_max: 0.66
+  actions:
+    green:
+      gross_exposure_mult: 1.0
+      turnover_mult: 1.0
+      allow_new_entries: true
+    yellow:
+      gross_exposure_mult: 0.65
+      turnover_mult: 0.7
+      allow_new_entries: true
+    red:
+      gross_exposure_mult: 0.2
+      turnover_mult: 0.3
+      allow_new_entries: false
+  defaults:
+    missing_metric_fill: 0.5
+    snapshot_lookback_days: 20

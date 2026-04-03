@@ -1,0 +1,27 @@
+classes:
+  broad_index:
+    labels: ["宽基", "沪深300", "中证500", "中证1000", "红利", "央国企", "全市场"]
+    strategy_template: momentum_core
+    monitor_template: broad_index_monitor
+    backtest_template: broad_index_backtest
+  sector_theme:
+    labels: ["行业", "主题", "科技", "芯片", "证券", "军工", "消费", "医药", "新能源", "有色"]
+    strategy_template: momentum_plus_risk
+    monitor_template: sector_theme_monitor
+    backtest_template: sector_theme_backtest
+  bond:
+    labels: ["债", "国债", "信用债", "可转债"]
+    strategy_template: carry_defensive
+    monitor_template: bond_monitor
+    backtest_template: bond_backtest
+  commodity_gold:
+    labels: ["黄金", "商品", "原油", "豆粕", "有色商品"]
+    strategy_template: macro_sensitive
+    monitor_template: commodity_monitor
+    backtest_template: commodity_backtest
+  cross_border:
+    labels: ["纳指", "标普", "恒生", "港股", "日经", "德国", "法国", "跨境", "海外"]
+    strategy_template: global_beta
+    monitor_template: cross_border_monitor
+    backtest_template: cross_border_backtest
+fallback_class: broad_index
