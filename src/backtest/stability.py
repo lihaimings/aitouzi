@@ -22,6 +22,7 @@ def run_parameter_stability_from_local_cache(
     benchmark_code: Optional[str] = None,
     max_turnover: Optional[float] = 0.8,
     use_risk_parity: bool = True,
+    asset_params: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> pd.DataFrame:
     close = load_close_matrix(codes=codes, source=source)
 
@@ -48,6 +49,7 @@ def run_parameter_stability_from_local_cache(
                     max_turnover=max_turnover,
                     use_risk_parity=use_risk_parity,
                     vol_lookback=vol_lookback,
+                    asset_params=asset_params,
                 )
                 m = res.metrics
                 objective = float(m.get("annual_return", 0.0) + 0.3 * m.get("max_drawdown", 0.0))

@@ -91,11 +91,54 @@ def compute_rotation_score(
     w_mom_long: float = 0.3,
     w_low_vol: float = 0.1,
     w_low_drawdown: float = 0.1,
+    asset_params: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> pd.DataFrame:
-    r1 = close_df.pct_change(mom_short)
-    r2 = close_df.pct_change(mom_long)
+    if asset_params:
+        score = pd.DataFrame(index=close_df.index, columns=close_df.columns, dtype=float)
+        for code in close_df.columns:
+            cfg = asset_params.get(str(code), {}) or {}
 
-    vol = close_df.pct_change().rolling(vol_window).std()
+            ms = max(1, int(cfg.get("mom_short", mom_short)))
+            ml = max(1, int(cfg.get("mom_long", mom_long)))
+            vw = max(2, int(cfg.get("vol_window", vol_window)))
+            dw = max(2, int(cfg.get("dd_window", dd_window)))
+
+            w1 = float(cfg.get("w_mom_short", w_mom_short))
+            w2 = float(cfg.get("w_mom_long", w_mom_long))
+            w3 = float(cfg.get("w_low_vol", w_low_vol))
+            w4 = float(cfg.get("w_low_drawdown", w_low_drawdown))
+
+            total_w = max(sum(max(0.0, x) for x in [w1, w2, w3, w4]), 1e-12)
+            w1 = max(0.0, w1) / total_w
+            w2 = max(0.0, w2) / total_w
+            w3 = max(0.0, w3) / total_w
+            w4 = max(0.0, w4) / total_w
+
+            s = close_df[code]
+            r1 = s.pct_change(ms, fill_method=None)
+            r2 = s.pct_change(ml, fill_method=None)
+            low_vol = -s.pct_change(fill_method=None).rolling(vw).std()
+            low_dd = s / s.rolling(dw).max() - 1.0
+
+            numerator = (
+                r1.fillna(0.0) * w1
+                + r2.fillna(0.0) * w2
+                + low_vol.fillna(0.0) * w3
+                + low_dd.fillna(0.0) * w4
+            )
+            denominator = (
+                (~r1.isna()).astype(float) * w1
+                + (~r2.isna()).astype(float) * w2
+                + (~low_vol.isna()).astype(float) * w3
+                + (~low_dd.isna()).astype(float) * w4
+            )
+            score[code] = numerator.div(denominator.where(denominator > 0.0))
+        return score
+
+    r1 = close_df.pct_change(mom_short, fill_method=None)
+    r2 = close_df.pct_change(mom_long, fill_method=None)
+
+    vol = close_df.pct_change(fill_method=None).rolling(vol_window).std()
     low_vol = -vol
 
     roll_max = close_df.rolling(dd_window).max()
@@ -159,6 +202,10 @@ def build_target_weights(
     entry_confirm_periods: int = 1,
     min_hold_rebalance_periods: int = 1,
     reentry_cooldown_periods: int = 0,
+    asset_class_map: Optional[Dict[str, str]] = None,
+    class_max_positions: Optional[Dict[str, int]] = None,
+    allowed_classes: Optional[List[str]] = None,
+    class_exposure_caps: Optional[Dict[str, float]] = None,
 ) -> pd.DataFrame:
     if top_n <= 0:
         raise ValueError("top_n 必须大于 0")
@@ -182,12 +229,26 @@ def build_target_weights(
     entry_confirm_periods = max(1, int(entry_confirm_periods))
     min_hold_rebalance_periods = max(1, int(min_hold_rebalance_periods))
     reentry_cooldown_periods = max(0, int(reentry_cooldown_periods))
+    asset_class_map = {str(k): str(v) for k, v in (asset_class_map or {}).items()}
+    class_max_positions = {str(k): max(0, int(v)) for k, v in (class_max_positions or {}).items()}
+    class_exposure_caps = {str(k): float(v) for k, v in (class_exposure_caps or {}).items()}
+    allowed_classes_set = set(str(x) for x in (allowed_classes or [])) if allowed_classes else None
+
+    def _cls(sym: str) -> str:
+        return str(asset_class_map.get(str(sym), "unknown"))
+
+    def _cls_cap(sym: str) -> int:
+        return int(class_max_positions.get(_cls(sym), 999999))
+
+    def _cls_count(symbols: List[str], cls: str) -> int:
+        return sum(1 for s in symbols if _cls(s) == cls)
 
     above_buy = score >= buy_threshold
     confirm_ok = above_buy.rolling(entry_confirm_periods).sum() >= entry_confirm_periods
 
     entry_step: Dict[str, int] = {}
     cooldown_until_step: Dict[str, int] = {}
+    class_new_entry_block_until: Dict[str, int] = {}
     current_holdings: set[str] = set()
 
     for step, dt in enumerate(rebalance_idx):
@@ -200,6 +261,13 @@ def build_target_weights(
         row = score.loc[dt].dropna()
         if row.empty:
             continue
+
+        if sentiment is not None:
+            s_now = sentiment.reindex(score.index).ffill().fillna(0.0)
+            sent_now = float(np.clip(float(s_now.loc[dt]), -1.0, 1.0))
+            if sent_now <= -0.15:
+                class_new_entry_block_until["sector_theme"] = max(class_new_entry_block_until.get("sector_theme", -1), step + 3)
+                class_new_entry_block_until["cross_border"] = max(class_new_entry_block_until.get("cross_border", -1), step + 4)
 
         dyn_top_n = int(top_n)
         cur_trend = float(trend_strength.loc[dt]) if pd.notna(trend_strength.loc[dt]) else 0.0
@@ -214,11 +282,19 @@ def build_target_weights(
         dyn_top_n = max(1, dyn_top_n)
         buy_mask = confirm_ok.loc[dt].reindex(row.index).fillna(False)
         buy_candidates = row[buy_mask]
+        if allowed_classes_set is not None:
+            allowed_idx = [s for s in buy_candidates.index.tolist() if _cls(str(s)) in allowed_classes_set]
+            buy_candidates = buy_candidates.reindex(allowed_idx).dropna()
 
         forced_keep = []
         optional_keep = []
         sold_now = []
         for sym in sorted(current_holdings):
+            sym_cls = _cls(sym)
+            if allowed_classes_set is not None and sym_cls not in allowed_classes_set:
+                sold_now.append(sym)
+                continue
+
             s = float(row.get(sym, np.nan)) if sym in row.index else np.nan
             entry_s = int(entry_step.get(sym, step))
             held_steps = step - entry_s
@@ -237,6 +313,7 @@ def build_target_weights(
             for sym in buy_candidates.sort_values(ascending=False).index.tolist()
             if sym not in current_holdings
             and step >= int(cooldown_until_step.get(sym, -1))
+            and step >= int(class_new_entry_block_until.get(_cls(str(sym)), -1))
         ]
 
         target_symbols = list(forced_keep)
@@ -245,11 +322,15 @@ def build_target_weights(
         for sym in optional_keep:
             if len(target_symbols) >= dyn_top_n:
                 break
+            if _cls_count(target_symbols, _cls(sym)) >= _cls_cap(sym):
+                continue
             target_symbols.append(sym)
 
         for sym in ranked_new:
             if len(target_symbols) >= dyn_top_n:
                 break
+            if _cls_count(target_symbols, _cls(sym)) >= _cls_cap(sym):
+                continue
             target_symbols.append(sym)
 
         if len(target_symbols) == 0:
@@ -285,7 +366,7 @@ def build_target_weights(
 
         w = pd.Series(0.0, index=score.columns)
         if use_risk_parity and close_df is not None:
-            vol = close_df.pct_change().rolling(vol_lookback).std().reindex(score.index).loc[dt, select.index]
+            vol = close_df.pct_change(fill_method=None).rolling(vol_lookback).std().reindex(score.index).loc[dt, select.index]
             inv_vol = 1.0 / vol.replace(0, np.nan)
             inv_vol = inv_vol.replace([np.inf, -np.inf], np.nan).dropna()
             if len(inv_vol) > 0:
@@ -295,6 +376,24 @@ def build_target_weights(
                 w[select.index] = risk_scale / len(select)
         else:
             w[select.index] = risk_scale / len(select)
+
+        if class_exposure_caps:
+            class_totals: Dict[str, float] = {}
+            for sym in select.index:
+                cls = _cls(str(sym))
+                class_totals[cls] = float(class_totals.get(cls, 0.0) + float(w.get(sym, 0.0)))
+
+            for cls, total_w in class_totals.items():
+                cap = class_exposure_caps.get(cls)
+                if cap is None:
+                    continue
+                cap = max(0.0, min(1.0, float(cap)))
+                if total_w > cap and total_w > 0:
+                    ratio = cap / total_w
+                    for sym in select.index:
+                        if _cls(str(sym)) == cls:
+                            w[sym] = float(w[sym]) * ratio
+
         weights.loc[dt] = w
 
         new_holding_set = set(select.index.astype(str).tolist())
@@ -346,7 +445,9 @@ def run_rotation_backtest(
     vol_target_lookback: int = 20,
     max_leverage: float = 1.0,
     drawdown_stop: Optional[float] = None,
+    drawdown_recovery: Optional[float] = None,
     dd_cooldown_days: int = 0,
+    dd_rearm_days: int = 0,
     amount_df: Optional[pd.DataFrame] = None,
     impact_bps: float = 0.0,
     impact_power: float = 0.5,
@@ -388,9 +489,14 @@ def run_rotation_backtest(
     trend_strong_threshold: float = 0.03,
     trend_weak_threshold: float = 0.0,
     max_trade_amount_ratio: Optional[float] = None,
+    asset_params: Optional[Dict[str, Dict[str, float]]] = None,
+    asset_class_map: Optional[Dict[str, str]] = None,
+    class_max_positions: Optional[Dict[str, int]] = None,
+    allowed_classes: Optional[List[str]] = None,
+    class_exposure_caps: Optional[Dict[str, float]] = None,
 ) -> BacktestResult:
     close_df = close_df.sort_index().ffill().dropna(how="all")
-    ret = close_df.pct_change().fillna(0.0)
+    ret = close_df.pct_change(fill_method=None).fillna(0.0)
 
     score = compute_rotation_score(
         close_df,
@@ -402,6 +508,7 @@ def run_rotation_backtest(
         w_mom_long=score_w_mom_long,
         w_low_vol=score_w_low_vol,
         w_low_drawdown=score_w_low_drawdown,
+        asset_params=asset_params,
     )
 
     trend_ref = pd.Series(benchmark_close).reindex(close_df.index).ffill() if benchmark_close is not None else None
@@ -435,6 +542,10 @@ def run_rotation_backtest(
         top_n_weak=top_n_weak,
         trend_strong_threshold=trend_strong_threshold,
         trend_weak_threshold=trend_weak_threshold,
+        asset_class_map=asset_class_map,
+        class_max_positions=class_max_positions,
+        allowed_classes=allowed_classes,
+        class_exposure_caps=class_exposure_caps,
     )
     weights = cap_weight_and_normalize(weights, max_single_weight=0.6)
 
@@ -457,7 +568,7 @@ def run_rotation_backtest(
     if benchmark_close is not None:
         bench_close = pd.Series(benchmark_close).reindex(ret.index).ffill()
         bench_ma = bench_close.rolling(max(5, int(regime_ma_window))).mean()
-        bench_vol = bench_close.pct_change().rolling(max(5, int(regime_vol_window))).std()
+        bench_vol = bench_close.pct_change(fill_method=None).rolling(max(5, int(regime_vol_window))).std()
 
     # 风险预算：波动目标 + 回撤保护（按日动态缩放仓位）
     exposure_scale = pd.Series(1.0, index=weights.index, dtype=float)
@@ -466,12 +577,16 @@ def run_rotation_backtest(
     peak_equity = float(init_cash)
     cur_equity = float(init_cash)
     cooldown = 0
+    dd_guard_armed = True
+    dd_rearm_left = 0
     month_tag = None
     month_peak_equity = float(init_cash)
     net_hist: List[float] = []
     stop_trigger_daily = 0
     stop_trigger_monthly = 0
     stop_trigger_total = 0
+    prev_scale = 1.0
+    recent_loss_streak = 0
 
     prev_eff_target = pd.Series(0.0, index=weights.columns)
     prev_eff_exec = pd.Series(0.0, index=weights.columns)
@@ -490,6 +605,7 @@ def run_rotation_backtest(
             month_peak_equity = float(cur_equity)
 
         scale = 1.0
+        force_zero = False
 
         if regime_filter_enabled and bench_close is not None and bench_ma is not None and bench_vol is not None:
             is_bear = bool(bench_close.loc[dt] < bench_ma.loc[dt]) if pd.notna(bench_ma.loc[dt]) else False
@@ -504,18 +620,56 @@ def run_rotation_backtest(
             else:
                 scale = float(max_leverage)
 
+        if len(net_hist) >= 15:
+            tail = pd.Series(net_hist[-40:], dtype=float)
+            tail_equity = (1.0 + tail).cumprod()
+            tail_peak = tail_equity.cummax()
+            tail_dd = float((tail_equity / tail_peak - 1.0).min()) if not tail.empty else 0.0
+            tail_mean_5 = float(pd.Series(net_hist[-5:], dtype=float).mean()) if len(net_hist) >= 5 else 0.0
+            if tail_dd <= -0.10:
+                scale = min(scale, 0.30)
+            elif tail_dd <= -0.06:
+                scale = min(scale, 0.50)
+            if tail_mean_5 <= -0.003:
+                scale = min(scale, 0.50)
+
+        if len(net_hist) > 0:
+            if net_hist[-1] < 0:
+                recent_loss_streak += 1
+            else:
+                recent_loss_streak = 0
+        if recent_loss_streak >= 4:
+            scale = min(scale, 0.25)
+        elif recent_loss_streak >= 2:
+            scale = min(scale, 0.45)
+
         if drawdown_stop is not None:
             cur_dd = cur_equity / max(peak_equity, 1e-12) - 1.0
+
+            if not dd_guard_armed:
+                if drawdown_recovery is not None and cur_dd >= float(drawdown_recovery):
+                    dd_guard_armed = True
+                    dd_rearm_left = 0
+                elif dd_rearm_left > 0:
+                    dd_rearm_left -= 1
+                    if dd_rearm_left <= 0:
+                        dd_guard_armed = True
+
             if cooldown > 0:
                 scale = 0.0
+                force_zero = True
                 cooldown -= 1
-            elif cur_dd <= drawdown_stop:
+            elif dd_guard_armed and cur_dd <= drawdown_stop:
                 scale = 0.0
+                force_zero = True
                 cooldown = max(dd_cooldown_days - 1, 0)
+                dd_guard_armed = False
+                dd_rearm_left = max(0, int(dd_rearm_days))
                 stop_trigger_total += 1
 
         if daily_loss_stop is not None and len(net_hist) > 0 and net_hist[-1] <= daily_loss_stop:
             scale = 0.0
+            force_zero = True
             cooldown = max(cooldown, max(stop_cooldown_days - 1, 0))
             stop_trigger_daily += 1
 
@@ -523,8 +677,20 @@ def run_rotation_backtest(
             month_dd = cur_equity / max(month_peak_equity, 1e-12) - 1.0
             if month_dd <= monthly_drawdown_stop:
                 scale = 0.0
+                force_zero = True
                 cooldown = max(cooldown, max(stop_cooldown_days - 1, 0))
                 stop_trigger_monthly += 1
+
+        scale = float(np.clip(scale, 0.0, max_leverage))
+        if not force_zero:
+            up_step = 0.12
+            down_step = 0.25
+            if scale > prev_scale:
+                scale = min(scale, prev_scale + up_step)
+            else:
+                scale = max(scale, prev_scale - down_step)
+
+        prev_scale = scale
 
         exposure_scale.loc[dt] = scale
         eff_target = base_target * scale
@@ -626,7 +792,9 @@ def run_from_local_cache(
     vol_target_lookback: int = 20,
     max_leverage: float = 1.0,
     drawdown_stop: Optional[float] = None,
+    drawdown_recovery: Optional[float] = None,
     dd_cooldown_days: int = 0,
+    dd_rearm_days: int = 0,
     impact_bps: float = 0.0,
     impact_power: float = 0.5,
     impact_bps_cap_mult: float = 5.0,
@@ -667,6 +835,11 @@ def run_from_local_cache(
     trend_weak_threshold: float = 0.0,
     init_cash: float = 10000.0,
     max_trade_amount_ratio: Optional[float] = None,
+    asset_params: Optional[Dict[str, Dict[str, float]]] = None,
+    asset_class_map: Optional[Dict[str, str]] = None,
+    class_max_positions: Optional[Dict[str, int]] = None,
+    allowed_classes: Optional[List[str]] = None,
+    class_exposure_caps: Optional[Dict[str, float]] = None,
 ) -> BacktestResult:
     close = load_close_matrix(codes=codes, source=source)
     amount = load_amount_matrix(codes=codes, source=source).reindex(close.index).fillna(0.0)
@@ -675,7 +848,7 @@ def run_from_local_cache(
     bench_close = None
     if benchmark_code is not None:
         bench_close = _load_etf_close(benchmark_code, source=source).reindex(close.index).ffill()
-        bench = bench_close.pct_change().fillna(0.0)
+        bench = bench_close.pct_change(fill_method=None).fillna(0.0)
 
     return run_rotation_backtest(
         close_df=close,
@@ -694,7 +867,9 @@ def run_from_local_cache(
         vol_target_lookback=vol_target_lookback,
         max_leverage=max_leverage,
         drawdown_stop=drawdown_stop,
+        drawdown_recovery=drawdown_recovery,
         dd_cooldown_days=dd_cooldown_days,
+        dd_rearm_days=dd_rearm_days,
         amount_df=amount,
         impact_bps=impact_bps,
         impact_power=impact_power,
@@ -736,6 +911,11 @@ def run_from_local_cache(
         trend_strong_threshold=trend_strong_threshold,
         trend_weak_threshold=trend_weak_threshold,
         max_trade_amount_ratio=max_trade_amount_ratio,
+        asset_params=asset_params,
+        asset_class_map=asset_class_map,
+        class_max_positions=class_max_positions,
+        allowed_classes=allowed_classes,
+        class_exposure_caps=class_exposure_caps,
     )
 
 
@@ -750,6 +930,7 @@ def run_walk_forward_from_local_cache(
     step_days: int = 20,
     top_n_grid: Optional[List[int]] = None,
     min_score_grid: Optional[List[float]] = None,
+    asset_params: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> Tuple[pd.DataFrame, pd.Series]:
     """
     滚动验证（walk-forward）：
@@ -783,6 +964,7 @@ def run_walk_forward_from_local_cache(
                     fee_bps=fee_bps,
                     slippage_bps=slippage_bps,
                     min_score=min_score,
+                    asset_params=asset_params,
                 )
                 obj = res_train.metrics["annual_return"] + 0.3 * res_train.metrics["max_drawdown"]
                 if obj > best_obj:
@@ -797,6 +979,7 @@ def run_walk_forward_from_local_cache(
             fee_bps=fee_bps,
             slippage_bps=slippage_bps,
             min_score=best_min_score,
+            asset_params=asset_params,
         )
 
         split_rows.append(

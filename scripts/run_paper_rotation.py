@@ -48,6 +48,7 @@ from src.reporting.feishu_push import push_dm
 from src.reporting.quantstats_report import generate_quantstats_html
 from src.strategy import (
     build_backtest_template,
+    build_signal_template,
     build_gatekeeper_metrics,
     classify_etf_frame,
     load_class_config,
@@ -388,6 +389,130 @@ def _build_gatekeeper_raw_metrics(benchmark_code: str, quality_df: pd.DataFrame,
     }
 
 
+def _build_macro_data_provenance(cfg: dict) -> dict:
+    mb = (cfg.get("macro_bridge") or {}) if isinstance(cfg, dict) else {}
+    source_path = str(mb.get("source_json", ""))
+    source_name = Path(source_path).name if source_path else ""
+
+    macro_ctx_path = ROOT / str(mb.get("output_json", "reports/macro_brain_context.json"))
+    macro_feat_path = ROOT / "reports" / "macro_features.json"
+    macro_hist_state_path = ROOT / "state" / "macro_history_3y_status.json"
+
+    ctx_exists = macro_ctx_path.exists()
+    feat_exists = macro_feat_path.exists()
+    hist_state_exists = macro_hist_state_path.exists()
+
+    hist_summary = {}
+    if hist_state_exists:
+        try:
+            hist_payload = json.loads(macro_hist_state_path.read_text(encoding="utf-8"))
+            hist_summary = (hist_payload.get("summary") or {}) if isinstance(hist_payload, dict) else {}
+        except Exception:
+            hist_summary = {}
+
+    source_mode = "unknown"
+    has_historical_news_series = False
+    if source_name == "ai_context_pack.json":
+        source_mode = "point_in_time_news_pack"
+        has_historical_news_series = False
+    elif source_name:
+        source_mode = "custom_json"
+
+    return {
+        "macro_bridge_enabled": bool(mb.get("enabled", False)),
+        "source_json": source_path,
+        "source_mode": source_mode,
+        "has_historical_news_series": has_historical_news_series,
+        "macro_context_exists": ctx_exists,
+        "macro_features_exists": feat_exists,
+        "macro_history_3y_state_exists": hist_state_exists,
+        "macro_history_3y_summary": hist_summary,
+        "backtest_gatekeeper_driver": "price_quality_proxy",
+        "notes": [
+            "Current gatekeeper macro_risk is computed from benchmark trend/volatility plus quality breadth.",
+            "Historical macro history exists for FRED series, but it is not currently wired into gatekeeper time-series state transitions.",
+        ],
+    }
+
+
+def _build_macro_history_sentiment_proxy(trading_index: pd.Index, macro_provenance: dict) -> tuple[pd.Series, dict]:
+    empty = pd.Series(0.0, index=trading_index, dtype=float)
+    summary = {
+        "enabled": False,
+        "driver": "price_quality_proxy",
+        "coverage_ratio": 0.0,
+        "coverage_days": 0,
+        "total_days": int(len(trading_index)),
+        "state_counts": {"green": 0, "yellow": 0, "red": 0},
+        "no_lookahead_shift_days": 1,
+    }
+
+    hist = (macro_provenance.get("macro_history_3y_summary") or {}) if isinstance(macro_provenance, dict) else {}
+    merged_path = str(hist.get("merged_path") or "")
+    if not merged_path:
+        return empty, summary
+
+    path = Path(merged_path)
+    if not path.exists():
+        return empty, summary
+
+    try:
+        df = pd.read_csv(path)
+        if "date" not in df.columns:
+            return empty, summary
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"]).sort_values("date").set_index("date")
+
+        for col in ["DGS10", "DGS2", "DTWEXBGS", "DCOILWTICO", "T10YIE"]:
+            if col not in df.columns:
+                df[col] = pd.NA
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        spread = (df["DGS10"] - df["DGS2"]).ffill()
+        usd_60 = df["DTWEXBGS"].ffill().pct_change(60, fill_method=None).fillna(0.0)
+        oil_20 = df["DCOILWTICO"].ffill().pct_change(20, fill_method=None).fillna(0.0)
+        be10 = df["T10YIE"].ffill()
+
+        risk = pd.Series(0.35, index=df.index, dtype=float)
+        risk = risk + (spread < 0.0).astype(float) * 0.25
+        risk = risk + (usd_60 > 0.03).astype(float) * 0.20
+        risk = risk + (oil_20 > 0.12).astype(float) * 0.15
+        risk = risk + (be10 > 2.8).astype(float) * 0.10
+        risk = risk.clip(lower=0.0, upper=1.0)
+
+        sentiment = ((0.5 - risk) / 0.5).clip(lower=-1.0, upper=1.0)
+        sentiment = sentiment.rolling(5, min_periods=1).mean()
+        sentiment = sentiment.shift(1)
+        sentiment = sentiment.reindex(pd.to_datetime(trading_index)).ffill().fillna(0.0)
+        sentiment.index = trading_index
+
+        state = pd.Series("yellow", index=sentiment.index, dtype=object)
+        state.loc[sentiment >= 0.2] = "green"
+        state.loc[sentiment <= -0.3] = "red"
+        state_counts = state.value_counts().to_dict()
+
+        coverage_days = int(sentiment.notna().sum())
+        total_days = int(len(sentiment))
+        coverage_ratio = float(coverage_days / total_days) if total_days > 0 else 0.0
+
+        summary = {
+            "enabled": True,
+            "driver": "macro_history_series_proxy",
+            "coverage_ratio": round(coverage_ratio, 4),
+            "coverage_days": coverage_days,
+            "total_days": total_days,
+            "state_counts": {
+                "green": int(state_counts.get("green", 0)),
+                "yellow": int(state_counts.get("yellow", 0)),
+                "red": int(state_counts.get("red", 0)),
+            },
+            "no_lookahead_shift_days": 1,
+        }
+        return sentiment, summary
+    except Exception:
+        return empty, summary
+
+
 def _apply_gatekeeper_to_exec_params(exec_params: dict, gate_result) -> dict:
     out = dict(exec_params)
     actions = gate_result.actions if gate_result is not None else {}
@@ -397,6 +522,28 @@ def _apply_gatekeeper_to_exec_params(exec_params: dict, gate_result) -> dict:
 
     out["target_vol_ann"] = max(0.01, float(out["target_vol_ann"]) * gross_mult)
     out["max_turnover"] = max(0.05, min(1.0, float(out["max_turnover"]) * turnover_mult))
+
+    state = str(getattr(gate_result, "state", "green"))
+    if state == "yellow":
+        out["target_vol_ann"] = min(float(out["target_vol_ann"]), 0.05)
+        out["max_turnover"] = min(float(out["max_turnover"]), 0.35)
+        out["drawdown_stop"] = max(float(out["drawdown_stop"]), -0.05)
+        out["dd_cooldown_days"] = max(int(out["dd_cooldown_days"]), 5)
+        out["dd_rearm_days"] = max(int(out["dd_rearm_days"]), 60)
+        out["monthly_drawdown_stop"] = max(float(out["monthly_drawdown_stop"]), -0.07)
+        out["stop_cooldown_days"] = max(int(out["stop_cooldown_days"]), 7)
+        out["reentry_cooldown_periods"] = max(int(out["reentry_cooldown_periods"]), 2)
+        out["entry_confirm_periods"] = max(int(out["entry_confirm_periods"]), 3)
+        out["max_trade_amount_ratio"] = max(0.005, min(float(out["max_trade_amount_ratio"]) * 0.6, 0.02))
+    elif state == "red":
+        out["target_vol_ann"] = min(float(out["target_vol_ann"]), 0.04)
+        out["max_turnover"] = min(float(out["max_turnover"]), 0.25)
+        out["monthly_drawdown_stop"] = max(float(out["monthly_drawdown_stop"]), -0.06)
+        out["daily_loss_stop"] = max(float(out["daily_loss_stop"]), -0.02)
+        out["stop_cooldown_days"] = max(int(out["stop_cooldown_days"]), 10)
+        out["reentry_cooldown_periods"] = max(int(out["reentry_cooldown_periods"]), 3)
+        out["entry_confirm_periods"] = max(int(out["entry_confirm_periods"]), 3)
+        out["max_trade_amount_ratio"] = max(0.003, min(float(out["max_trade_amount_ratio"]) * 0.4, 0.015))
 
     if not allow_new_entries:
         out["min_score"] = max(float(out["min_score"]), 1.0)
@@ -418,6 +565,168 @@ def _apply_class_template_to_exec_params(exec_params: dict, cls_snapshot: dict) 
     out["top_n"] = max(1, min(int(out["top_n"]), int(template.get("holding_limit", out["top_n"]))))
     out["dominant_strategy_class"] = str(cls_snapshot.get("dominant_class", "broad_index"))
     out["dominant_backtest_template"] = template_name
+    return out
+
+
+def _derive_tradable_codes(codes: list[str], quality_df: pd.DataFrame, exclude_fail: bool, prefix: str = "paper_rotation"):
+    if (not exclude_fail) or quality_df is None or quality_df.empty or "severity" not in quality_df.columns:
+        return list(codes), [], None
+
+    code_col = None
+    for c in ["code", "代码", "symbol"]:
+        if c in quality_df.columns:
+            code_col = c
+            break
+    if code_col is None:
+        return list(codes), [], None
+
+    fail_df = quality_df[quality_df["severity"].astype(str).str.upper() == "FAIL"].copy()
+    fail_codes = []
+    for v in fail_df[code_col].tolist():
+        code6 = _extract_code6(v)
+        if code6:
+            fail_codes.append(code6)
+    fail_set = set(fail_codes)
+
+    tradable = [str(c) for c in codes if str(c) not in fail_set]
+    excluded = [str(c) for c in codes if str(c) in fail_set]
+
+    out_path = ROOT / "reports" / f"{prefix}_excluded_fail_codes.csv"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"code": excluded, "reason": "quality_fail"}).to_csv(out_path, index=False, encoding="utf-8-sig")
+
+    return tradable, excluded, out_path
+
+
+def _build_asset_params_from_classification(cls_df: pd.DataFrame, exec_params: dict) -> dict:
+    if cls_df is None or cls_df.empty:
+        return {}
+
+    out = {}
+    for _, row in cls_df.iterrows():
+        code6 = _extract_code6(row.get("code"))
+        if not code6:
+            continue
+
+        strategy_template = str(row.get("strategy_template", "momentum_core"))
+        sig_tpl = build_signal_template(strategy_template)
+        lookbacks = [int(x) for x in (sig_tpl.get("lookbacks") or []) if str(x).isdigit()]
+        if not lookbacks:
+            lookbacks = [int(exec_params.get("score_mom_short", 20)), int(exec_params.get("score_mom_long", 60))]
+
+        mom_short = max(1, min(lookbacks))
+        mom_long = max(1, max(lookbacks))
+        risk_overlay = bool(sig_tpl.get("risk_overlay", False))
+
+        if strategy_template == "momentum_plus_risk":
+            w_mom_short, w_mom_long, w_low_vol, w_low_drawdown = 0.40, 0.30, 0.15, 0.15
+        elif strategy_template == "carry_defensive":
+            w_mom_short, w_mom_long, w_low_vol, w_low_drawdown = 0.20, 0.20, 0.30, 0.30
+        elif strategy_template == "macro_sensitive":
+            w_mom_short, w_mom_long, w_low_vol, w_low_drawdown = 0.35, 0.25, 0.20, 0.20
+        elif strategy_template == "global_beta":
+            w_mom_short, w_mom_long, w_low_vol, w_low_drawdown = 0.35, 0.35, 0.15, 0.15
+        else:
+            w_mom_short = float(exec_params.get("score_w_mom_short", 0.50))
+            w_mom_long = float(exec_params.get("score_w_mom_long", 0.30))
+            w_low_vol = float(exec_params.get("score_w_low_vol", 0.10))
+            w_low_drawdown = float(exec_params.get("score_w_low_drawdown", 0.10))
+
+        out[code6] = {
+            "strategy_class": str(row.get("strategy_class", "broad_index")),
+            "strategy_template": strategy_template,
+            "mom_short": mom_short,
+            "mom_long": mom_long,
+            "vol_window": int(exec_params.get("score_vol_window", 20)),
+            "dd_window": int(exec_params.get("score_dd_window", 60)),
+            "w_mom_short": float(w_mom_short),
+            "w_mom_long": float(w_mom_long),
+            "w_low_vol": float(w_low_vol if risk_overlay else max(0.05, w_low_vol)),
+            "w_low_drawdown": float(w_low_drawdown if risk_overlay else max(0.05, w_low_drawdown)),
+        }
+
+    return out
+
+
+def _build_gatekeeper_class_constraints(exec_params: dict, asset_params: dict) -> dict:
+    gate_state = str(exec_params.get("gatekeeper_state", "green")).lower()
+    if gate_state == "red":
+        return {
+            "allowed_classes": ["broad_index", "bond", "commodity_gold"],
+            "class_max_positions": {
+                "broad_index": 1,
+                "bond": 1,
+                "commodity_gold": 1,
+                "sector_theme": 0,
+                "cross_border": 0,
+            },
+            "class_exposure_caps": {
+                "broad_index": 0.50,
+                "bond": 0.50,
+                "commodity_gold": 0.30,
+                "sector_theme": 0.00,
+                "cross_border": 0.00,
+            },
+        }
+    if gate_state == "yellow":
+        return {
+            "allowed_classes": None,
+            "class_max_positions": {
+                "sector_theme": 1,
+                "cross_border": 1,
+                "bond": 2,
+                "commodity_gold": 2,
+            },
+            "class_exposure_caps": {
+                "sector_theme": 0.15,
+                "cross_border": 0.08,
+                "bond": 0.45,
+                "commodity_gold": 0.25,
+            },
+        }
+    return {"allowed_classes": None, "class_max_positions": {}, "class_exposure_caps": {}}
+
+
+def _save_strategy_effective_snapshot(
+    exec_params: dict,
+    class_snapshot: dict,
+    asset_params: dict,
+    gate_result,
+    class_constraints: dict,
+) -> Path:
+    out = ROOT / "reports" / "paper_rotation_strategy_effective_snapshot.json"
+    template_counts = {}
+    class_counts = {}
+    for cfg in asset_params.values():
+        tpl = str(cfg.get("strategy_template", "unknown"))
+        klass = str(cfg.get("strategy_class", "unknown"))
+        template_counts[tpl] = int(template_counts.get(tpl, 0) + 1)
+        class_counts[klass] = int(class_counts.get(klass, 0) + 1)
+
+    payload = {
+        "dominant_strategy_class": exec_params.get("dominant_strategy_class"),
+        "dominant_backtest_template": exec_params.get("dominant_backtest_template"),
+        "gatekeeper": gate_result.to_dict() if gate_result is not None else {},
+        "effective_exec_params": {
+            "top_n": exec_params.get("top_n"),
+            "min_score": exec_params.get("min_score"),
+            "buy_threshold": exec_params.get("buy_threshold"),
+            "sell_threshold": exec_params.get("sell_threshold"),
+            "target_vol_ann": exec_params.get("target_vol_ann"),
+            "max_turnover": exec_params.get("max_turnover"),
+            "fee_bps": exec_params.get("fee_bps"),
+            "slippage_bps": exec_params.get("slippage_bps"),
+        },
+        "classification_snapshot": class_snapshot,
+        "asset_strategy_templates": {
+            "count": int(len(asset_params)),
+            "template_counts": template_counts,
+            "class_counts": class_counts,
+            "samples": list(asset_params.items())[:12],
+        },
+        "class_constraints": class_constraints,
+    }
+    out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
 
 
@@ -512,8 +821,63 @@ def _backtest_validity_score(window_snapshot: dict, wf_table: pd.DataFrame, qual
     }
 
 
+def _build_macro_alignment_audit(macro_provenance: dict, window_snapshot: dict) -> dict:
+    start = str(window_snapshot.get("start") or "")
+    end = str(window_snapshot.get("end") or "")
+    hist = (macro_provenance.get("macro_history_3y_summary") or {}) if isinstance(macro_provenance, dict) else {}
+    hist_start = str(hist.get("merged_min_date") or "")
+    hist_end = str(hist.get("merged_max_date") or "")
+
+    coverage = "unknown"
+    if start and end and hist_start and hist_end:
+        if hist_start <= start and hist_end >= end:
+            coverage = "full"
+        elif hist_end < start or hist_start > end:
+            coverage = "none"
+        else:
+            coverage = "partial"
+
+    has_hist_news = bool(macro_provenance.get("has_historical_news_series", False))
+    driver = str(macro_provenance.get("backtest_gatekeeper_driver", "unknown"))
+    source_mode = str(macro_provenance.get("source_mode", "unknown"))
+
+    if has_hist_news and driver == "macro_news_series":
+        realism = "aligned"
+    elif driver == "macro_history_series_proxy":
+        realism = "partial"
+    elif source_mode == "point_in_time_news_pack" and driver != "macro_news_series":
+        realism = "mismatch"
+    else:
+        realism = "partial"
+
+    return {
+        "backtest_window": {"start": start, "end": end},
+        "macro_history_window": {"start": hist_start, "end": hist_end, "coverage": coverage},
+        "source_mode": source_mode,
+        "has_historical_news_series": has_hist_news,
+        "gatekeeper_driver": driver,
+        "realism_status": realism,
+        "no_lookahead_assumption": "only_past_data_if_time_series_wired",
+    }
+
+
+def _sentiment_exposure_cap_by_gate(exec_params: dict, base_cap: float) -> float:
+    state = str(exec_params.get("gatekeeper_state", "green")).lower()
+    cap = float(base_cap)
+    if state == "yellow":
+        cap = min(cap, 0.22)
+    elif state == "red":
+        cap = min(cap, 0.12)
+    else:
+        cap = min(cap, 0.35)
+    return max(0.0, cap)
+
+
 def main():
     cfg = _load_config()
+    macro_provenance = _build_macro_data_provenance(cfg)
+    macro_provenance_path = ROOT / "reports" / "paper_rotation_macro_data_provenance.json"
+    macro_provenance_path.write_text(json.dumps(macro_provenance, ensure_ascii=False, indent=2), encoding="utf-8")
     cfg_backtest = (((cfg.get("operations") or {}).get("backtest_validation") or {}) if isinstance(cfg, dict) else {})
     trading_days_per_year = int(cfg_backtest.get("trading_days_per_year", 240))
     min_backtest_years = float(cfg_backtest.get("min_years", 2.0))
@@ -547,7 +911,14 @@ def main():
         "max_turnover": float(approved_params.get("max_turnover", 0.8)),
         "target_vol_ann": float(approved_params.get("target_vol_ann", 0.12)),
         "drawdown_stop": float(approved_params.get("drawdown_stop", -0.05)),
+        "drawdown_recovery": float(
+            approved_params.get(
+                "drawdown_recovery",
+                max(float(approved_params.get("drawdown_stop", -0.05)) * 0.5, -0.02),
+            )
+        ),
         "dd_cooldown_days": int(approved_params.get("dd_cooldown_days", 5)),
+        "dd_rearm_days": int(approved_params.get("dd_rearm_days", 60)),
         "fee_bps": float(approved_params.get("fee_bps", cfg_cost_model.get("fee_bps", 5.0))),
         "slippage_bps": float(approved_params.get("slippage_bps", cfg_cost_model.get("slippage_bps", 5.0))),
         "impact_bps": float(approved_params.get("impact_bps", cfg_cost_model.get("impact_bps", 2.0))),
@@ -608,7 +979,22 @@ def main():
     )
     quality_csv_path, quality_md_path = save_quality_reports(quality_df, prefix="paper_rotation")
 
-    class_df, class_snapshot = _build_classification_snapshot(codes)
+    exclude_fail_from_backtest = bool(cfg_quality.get("exclude_fail_from_backtest", True))
+    tradable_codes, excluded_fail_codes, excluded_fail_path = _derive_tradable_codes(
+        codes=list(codes),
+        quality_df=quality_df,
+        exclude_fail=exclude_fail_from_backtest,
+        prefix="paper_rotation",
+    )
+    if len(tradable_codes) < max(5, min(20, len(codes) // 4)):
+        print("[warn] tradable codes too few after quality FAIL exclusion, fallback to original discovered codes")
+        tradable_codes = list(codes)
+        excluded_fail_codes = []
+        excluded_fail_path = None
+
+    benchmark_code = _pick_benchmark(tradable_codes if tradable_codes else codes)
+
+    class_df, class_snapshot = _build_classification_snapshot(tradable_codes)
     class_snapshot_path = ROOT / "reports" / "paper_rotation_strategy_class_snapshot.json"
     class_snapshot_path.write_text(json.dumps(class_snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
     class_csv_path = ROOT / "reports" / "paper_rotation_strategy_classification.csv"
@@ -627,15 +1013,48 @@ def main():
 
     exec_params = _apply_class_template_to_exec_params(exec_params, class_snapshot)
     exec_params = _apply_gatekeeper_to_exec_params(exec_params, gate_result)
+    asset_params = _build_asset_params_from_classification(cls_df=class_df, exec_params=exec_params)
+    class_constraints = _build_gatekeeper_class_constraints(exec_params=exec_params, asset_params=asset_params)
+    asset_class_map = {str(k): str(v.get("strategy_class", "unknown")) for k, v in asset_params.items()}
+    sentiment_exposure_cap = _sentiment_exposure_cap_by_gate(
+        exec_params=exec_params,
+        base_cap=float(exec_params.get("ai_referee_exposure_cap", 0.15)),
+    )
+
+    bench_index = load_close_matrix(codes=[benchmark_code], source="baostock").index
+    macro_sentiment, macro_sent_summary = _build_macro_history_sentiment_proxy(
+        trading_index=bench_index,
+        macro_provenance=macro_provenance,
+    )
+    macro_regime_path = ROOT / "reports" / "paper_rotation_macro_regime_proxy.csv"
+    pd.DataFrame(
+        {
+            "date": macro_sentiment.index,
+            "macro_sentiment": macro_sentiment.values,
+        }
+    ).to_csv(macro_regime_path, index=False, encoding="utf-8")
+
+    macro_provenance["backtest_gatekeeper_driver"] = str(macro_sent_summary.get("driver", "price_quality_proxy"))
+    macro_provenance["macro_sentiment_proxy"] = macro_sent_summary
+    macro_provenance_path.write_text(json.dumps(macro_provenance, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    strategy_effective_snapshot_path = _save_strategy_effective_snapshot(
+        exec_params=exec_params,
+        class_snapshot=class_snapshot,
+        asset_params=asset_params,
+        gate_result=gate_result,
+        class_constraints=class_constraints,
+    )
 
     baseline_result = run_from_local_cache(
-        codes=codes,
+        codes=tradable_codes,
         source="baostock",
         rebalance="W-FRI",
         top_n=exec_params["top_n"],
         fee_bps=exec_params["fee_bps"],
         slippage_bps=exec_params["slippage_bps"],
         min_score=exec_params["min_score"],
+        sentiment=macro_sentiment,
         benchmark_code=benchmark_code,
         max_turnover=exec_params["max_turnover"],
         use_risk_parity=True,
@@ -644,7 +1063,9 @@ def main():
         vol_target_lookback=20,
         max_leverage=1.0,
         drawdown_stop=exec_params["drawdown_stop"],
+        drawdown_recovery=exec_params["drawdown_recovery"],
         dd_cooldown_days=exec_params["dd_cooldown_days"],
+        dd_rearm_days=exec_params["dd_rearm_days"],
         impact_bps=exec_params["impact_bps"],
         impact_power=exec_params["impact_power"],
         impact_bps_cap_mult=exec_params["impact_bps_cap_mult"],
@@ -682,8 +1103,14 @@ def main():
         entry_confirm_periods=exec_params["entry_confirm_periods"],
         min_hold_rebalance_periods=exec_params["min_hold_rebalance_periods"],
         reentry_cooldown_periods=exec_params["reentry_cooldown_periods"],
+        sentiment_exposure_cap=sentiment_exposure_cap,
         init_cash=exec_params["init_cash"],
         max_trade_amount_ratio=exec_params["max_trade_amount_ratio"],
+        asset_params=asset_params,
+        asset_class_map=asset_class_map,
+        class_max_positions=class_constraints.get("class_max_positions") or {},
+        allowed_classes=class_constraints.get("allowed_classes"),
+        class_exposure_caps=class_constraints.get("class_exposure_caps") or {},
     )
 
     ai_referee_csv_path = None
@@ -715,7 +1142,7 @@ def main():
 
             sent_series = ai_ref_sent.reindex(baseline_result.daily_returns.index).ffill().fillna(0.0)
             ai_result = run_from_local_cache(
-                codes=codes,
+                codes=tradable_codes,
                 source="baostock",
                 rebalance="W-FRI",
                 top_n=exec_params["top_n"],
@@ -731,7 +1158,9 @@ def main():
                 vol_target_lookback=20,
                 max_leverage=1.0,
                 drawdown_stop=exec_params["drawdown_stop"],
+                drawdown_recovery=exec_params["drawdown_recovery"],
                 dd_cooldown_days=exec_params["dd_cooldown_days"],
+                dd_rearm_days=exec_params["dd_rearm_days"],
                 impact_bps=exec_params["impact_bps"],
                 impact_power=exec_params["impact_power"],
                 impact_bps_cap_mult=exec_params["impact_bps_cap_mult"],
@@ -753,7 +1182,7 @@ def main():
                 score_w_low_drawdown=exec_params["score_w_low_drawdown"],
                 buy_threshold=exec_params["buy_threshold"],
                 sell_threshold=exec_params["sell_threshold"],
-                sentiment_exposure_cap=exec_params["ai_referee_exposure_cap"],
+                sentiment_exposure_cap=sentiment_exposure_cap,
                 entry_confirm_periods=exec_params["entry_confirm_periods"],
                 min_hold_rebalance_periods=exec_params["min_hold_rebalance_periods"],
                 reentry_cooldown_periods=exec_params["reentry_cooldown_periods"],
@@ -772,6 +1201,11 @@ def main():
                 trend_weak_threshold=exec_params["trend_weak_threshold"],
                 init_cash=exec_params["init_cash"],
                 max_trade_amount_ratio=exec_params["max_trade_amount_ratio"],
+                asset_params=asset_params,
+                asset_class_map=asset_class_map,
+                class_max_positions=class_constraints.get("class_max_positions") or {},
+                allowed_classes=class_constraints.get("allowed_classes"),
+                class_exposure_caps=class_constraints.get("class_exposure_caps") or {},
             )
             ab_csv_path, ab_json_path, ab_md_path = save_ab_compare(
                 baseline_metrics=baseline_result.metrics,
@@ -810,7 +1244,7 @@ def main():
     wf_step_days = int(cfg_backtest.get("wf_step_days", 20))
 
     wf_table, wf_returns = run_walk_forward_from_local_cache(
-        codes=codes,
+        codes=tradable_codes,
         source="baostock",
         rebalance="W-FRI",
         fee_bps=exec_params["fee_bps"],
@@ -820,6 +1254,7 @@ def main():
         step_days=wf_step_days,
         top_n_grid=[1, 2],
         min_score_grid=[-0.2, -0.1, 0.0],
+        asset_params=asset_params,
     )
     wf_table_path = ROOT / "reports" / "paper_rotation_walk_forward.csv"
     wf_equity_path = ROOT / "reports" / "paper_rotation_walk_forward_equity.csv"
@@ -827,7 +1262,7 @@ def main():
     ((1.0 + wf_returns).cumprod().rename("wf_equity")).to_csv(wf_equity_path, index=True)
 
     stability_df = run_parameter_stability_from_local_cache(
-        codes=codes,
+        codes=tradable_codes,
         source="baostock",
         rebalance="W-FRI",
         fee_bps=exec_params["fee_bps"],
@@ -838,6 +1273,7 @@ def main():
         benchmark_code=benchmark_code,
         max_turnover=0.8,
         use_risk_parity=True,
+        asset_params=asset_params,
     )
     stability_csv_path, stability_md_path, stability_pivot_csvs, stability_heatmaps = save_parameter_stability_outputs(
         stability_df,
@@ -914,7 +1350,7 @@ def main():
         except Exception as e:
             print(f"[warn] AI研究报告生成失败: {e}")
 
-    amount_df = load_amount_matrix(codes=codes, source="baostock").reindex(result.weights.index).fillna(0.0)
+    amount_df = load_amount_matrix(codes=tradable_codes, source="baostock").reindex(result.weights.index).fillna(0.0)
     fills = simulate_paper_trades(
         result.weights,
         init_cash=exec_params["init_cash"],
@@ -935,11 +1371,16 @@ def main():
         latest_weights=result.weights.iloc[-1],
         start_date=pd.Timestamp(result.equity.index.min()),
         end_date=pd.Timestamp(result.equity.index.max()),
+        strategy_context={
+            "dominant_strategy_class": exec_params.get("dominant_strategy_class", "unknown"),
+            "dominant_backtest_template": exec_params.get("dominant_backtest_template", "unknown"),
+            "gatekeeper_state": exec_params.get("gatekeeper_state", "unknown"),
+        },
     )
     report_path = save_report(report_text, filename="paper_rotation_daily.md")
 
     qs_path = _try_generate_quantstats(result)
-    baseline_stats = _try_run_backtestingpy_baseline(code=codes[0], cash=exec_params["init_cash"])
+    baseline_stats = _try_run_backtestingpy_baseline(code=tradable_codes[0], cash=exec_params["init_cash"])
 
     baseline_text = ""
     if baseline_stats is not None:
@@ -951,6 +1392,9 @@ def main():
 
     quality_counts = quality_df["severity"].value_counts().to_dict() if not quality_df.empty else {}
     window_snapshot = _build_window_snapshot(result=result, benchmark_code=benchmark_code, source="baostock")
+    macro_alignment = _build_macro_alignment_audit(macro_provenance=macro_provenance, window_snapshot=window_snapshot)
+    macro_alignment_path = ROOT / "reports" / "paper_rotation_macro_alignment_audit.json"
+    macro_alignment_path.write_text(json.dumps(macro_alignment, ensure_ascii=False, indent=2), encoding="utf-8")
     validity = _backtest_validity_score(
         window_snapshot=window_snapshot,
         wf_table=wf_table,
@@ -995,8 +1439,15 @@ def main():
         f"纸盘运行完成（风险状态: {risk_review.get('status', 'PASS')}）\n"
         f"- 执行参数: {exec_params}\n"
         f"- 总闸门: state={exec_params.get('gatekeeper_state')}, score={exec_params.get('gatekeeper_score'):.4f}, actions={exec_params.get('gatekeeper_actions')}\n"
+        f"- 宏观数据口径: source_mode={macro_provenance.get('source_mode')}, historical_news_series={macro_provenance.get('has_historical_news_series')}, gatekeeper_driver={macro_provenance.get('backtest_gatekeeper_driver')}\n"
+        f"- 宏观代理序列: enabled={macro_sent_summary.get('enabled')}, coverage={macro_sent_summary.get('coverage_ratio')}, state_counts={macro_sent_summary.get('state_counts')}, shift_days={macro_sent_summary.get('no_lookahead_shift_days')}\n"
+        f"- 宏观风险缩放上限: sentiment_exposure_cap_effective={sentiment_exposure_cap}\n"
+        f"- 宏观对齐检查: status={macro_alignment.get('realism_status')}, coverage={((macro_alignment.get('macro_history_window') or {}).get('coverage'))}\n"
+        f"- 分类硬约束: {class_constraints}\n"
         f"- 分型主类: {exec_params.get('dominant_strategy_class')} | 模板: {exec_params.get('dominant_backtest_template')}\n"
         f"- 分型统计: {class_snapshot.get('class_counts', {})}\n"
+        f"- 标的池: discovered={len(codes)}, tradable={len(tradable_codes)}, excluded_fail={len(excluded_fail_codes)}, exclude_fail_enabled={exclude_fail_from_backtest}\n"
+        f"- 质量FAIL剔除列表: {excluded_fail_path}\n"
         f"- 审批参数文件: {approved_path}\n"
         f"- 基准: {benchmark_code}\n"
         f"- 数据质量: {quality_counts}\n"
@@ -1011,7 +1462,7 @@ def main():
         f"- 单日成交额占比上限: {exec_params['max_trade_amount_ratio']:.2%}\n"
         f"- 风险预算缩放: {exposure_path}\n"
         f"- 成本模型: fee={exec_params['fee_bps']}bps, slippage={exec_params['slippage_bps']}bps, impact={exec_params['impact_bps']}bps, power={exec_params['impact_power']}\n"
-        f"- 停盘阈值: daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
+        f"- 停盘阈值: total_dd={exec_params['drawdown_stop']}, dd_recovery={exec_params['drawdown_recovery']}, dd_cooldown={exec_params['dd_cooldown_days']}, dd_rearm={exec_params['dd_rearm_days']}, daily={exec_params['daily_loss_stop']}, monthly_dd={exec_params['monthly_drawdown_stop']}, cooldown={exec_params['stop_cooldown_days']}\n"
         f"- 市场状态过滤: enabled={exec_params['regime_filter_enabled']}, ma={exec_params['regime_ma_window']}, vol_window={exec_params['regime_vol_window']}, vol_th={exec_params['regime_high_vol_threshold']}, def_exp={exec_params['regime_defensive_exposure']}\n"
         f"- 选股打分参数: mom=({exec_params['score_mom_short']},{exec_params['score_mom_long']}), vol_win={exec_params['score_vol_window']}, dd_win={exec_params['score_dd_window']}, w=({exec_params['score_w_mom_short']},{exec_params['score_w_mom_long']},{exec_params['score_w_low_vol']},{exec_params['score_w_low_drawdown']})\n"
         f"- 择时开关: enabled={exec_params['timing_switch_enabled']}, ma=({exec_params['trend_short_ma']},{exec_params['trend_long_ma']}), gate={exec_params['trend_gate_threshold']}, amp_th={exec_params['trend_amplify_threshold']}, amp_mult={exec_params['trend_amplify_mult']}, def_scale={exec_params['trend_defensive_scale']}\n"
@@ -1041,6 +1492,10 @@ def main():
         f"- 分型快照CSV: {class_csv_path}\n"
         f"- 分型快照JSON: {class_snapshot_path}\n"
         f"- 总闸门快照JSON: {gate_snapshot_path}\n"
+        f"- 宏观数据口径JSON: {macro_provenance_path}\n"
+        f"- 宏观代理序列CSV: {macro_regime_path}\n"
+        f"- 宏观对齐审计JSON: {macro_alignment_path}\n"
+        f"- 新策略生效快照JSON: {strategy_effective_snapshot_path}\n"
         f"- 风控检查JSON: {risk_json_path}\n"
         f"- 风控检查MD: {risk_md_path}\n"
         f"- 风控失败项: {risk_review.get('fail_items', [])}\n"

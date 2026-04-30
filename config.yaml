@@ -95,7 +95,7 @@ report:
     monthly: true
 macro_bridge:
   enabled: true
-  source_json: /home/openclaw/work/macro_brain_platform/outputs/macro_narrative.json
+  source_json: /home/openclaw/work/macro_brain_platform/outputs/ai_context_pack.json
   output_json: reports/macro_brain_context.json
   output_md: reports/macro_brain_context.md
 

@@ -1,0 +1,7 @@
+from pathlib import Path
+from src.reporting.feishu_push import push_dm
+
+report_path = Path('reports/paper_trade_daily_2026-03-18.md')
+text = report_path.read_text(encoding='utf-8')
+push_dm(text)
+print(f'pushed: {report_path}')

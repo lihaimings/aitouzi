@@ -11,6 +11,7 @@ def render_markdown_report(
     latest_weights: pd.Series,
     start_date: Optional[pd.Timestamp] = None,
     end_date: Optional[pd.Timestamp] = None,
+    strategy_context: Optional[Dict[str, object]] = None,
 ) -> str:
     def pct(x: float) -> str:
         return f"{x * 100:.2f}%"
@@ -18,6 +19,11 @@ def render_markdown_report(
     period = ""
     if start_date is not None and end_date is not None:
         period = f"\n- 回测区间：{start_date.date()} ~ {end_date.date()}"
+
+    strategy_context = strategy_context or {}
+    dominant_class = str(strategy_context.get("dominant_strategy_class", "unknown"))
+    dominant_template = str(strategy_context.get("dominant_backtest_template", "unknown"))
+    gatekeeper_state = str(strategy_context.get("gatekeeper_state", "unknown"))
 
     active = latest_weights[latest_weights > 0].sort_values(ascending=False)
     if active.empty:
@@ -59,7 +65,9 @@ def render_markdown_report(
         "## 最新持仓\n"
         f"{pos_text}\n\n"
         "## 说明\n"
-        "- 策略：ETF 轮动（20/60日动量），周频调仓\n"
+        f"- 策略主类：{dominant_class}（模板：{dominant_template}）\n"
+        f"- 总闸门状态：{gatekeeper_state}\n"
+        "- 执行模型：分类模板 + 红黄绿风控约束 + 多因子轮动引擎\n"
         "- 约束：含手续费+滑点，支持换手上限与风险平价权重\n"
         "- 风险提示：历史回测不代表未来表现\n"
     )
